@@ -1,0 +1,57 @@
+import { supabase } from './client.js'
+import type { DbPeriod, DbPeriodInsert } from '../types/index.js'
+import { logger } from '../lib/logger.js'
+
+export async function createPeriods(periods: DbPeriodInsert[]): Promise<DbPeriod[]> {
+  logger.debug('[db/periods] createPeriods', { userId: periods[0]?.user_id, count: periods.length })
+
+  const { data, error } = await supabase
+    .from('sch_periods')
+    .insert(periods)
+    .select()
+
+  if (error) {
+    logger.error('[db/periods] createPeriods error', { userId: periods[0]?.user_id, error: error.message })
+    throw new Error(`Failed to create periods: ${error.message}`)
+  }
+
+  logger.info('[db/periods] createPeriods done', { userId: periods[0]?.user_id, created: data.length })
+  return data
+}
+
+export async function getUserPeriods(userId: string): Promise<DbPeriod[]> {
+  logger.debug('[db/periods] getUserPeriods', { userId })
+
+  const { data, error } = await supabase
+    .from('sch_periods')
+    .select('*')
+    .eq('user_id', userId)
+    .order('order_index', { ascending: true })
+
+  if (error) {
+    logger.error('[db/periods] getUserPeriods error', { userId, error: error.message })
+    throw new Error(`Failed to get periods for user ${userId}: ${error.message}`)
+  }
+
+  logger.debug('[db/periods] getUserPeriods result', { userId, count: data.length })
+  return data
+}
+
+export async function getPeriodsForDay(userId: string, dayOfWeek: number): Promise<DbPeriod[]> {
+  logger.debug('[db/periods] getPeriodsForDay', { userId, dayOfWeek })
+
+  const { data, error } = await supabase
+    .from('sch_periods')
+    .select('*')
+    .eq('user_id', userId)
+    .contains('days_of_week', [dayOfWeek])
+    .order('start_time', { ascending: true })
+
+  if (error) {
+    logger.error('[db/periods] getPeriodsForDay error', { userId, dayOfWeek, error: error.message })
+    throw new Error(`Failed to get periods for user ${userId} day ${dayOfWeek}: ${error.message}`)
+  }
+
+  logger.debug('[db/periods] getPeriodsForDay result', { userId, dayOfWeek, count: data.length })
+  return data
+}

@@ -1,0 +1,191 @@
+import { InlineKeyboard } from 'grammy'
+import type { Conversation } from '@grammyjs/conversations'
+import type { BotContext } from '../index.js'
+
+type OnboardingConversation = Conversation<BotContext, BotContext>
+import { continueInterview, parseInterviewResult, type ChatMessage, type InterviewResult } from '../../llm/interview.js'
+import { getUserByTelegramId, createUser, updateUser } from '../../db/users.js'
+import { createPeriods } from '../../db/periods.js'
+import { registerUserCrons } from '../../cron/manager.js'
+import { logger } from '../../lib/logger.js'
+
+function formatPeriodDays(days: number[]): string {
+  const names: Record<number, string> = { 1: 'Пн', 2: 'Вт', 3: 'Ср', 4: 'Чт', 5: 'Пт', 6: 'Сб', 7: 'Вс' }
+  return days.map((d) => names[d] ?? String(d)).join(', ')
+}
+
+function formatSummary(result: InterviewResult): string {
+  const periodLines = result.periods
+    .map((p) => `• ${p.name} (${p.start_time}–${p.end_time}, ${formatPeriodDays(p.days_of_week)})`)
+    .join('\n')
+
+  return [
+    'Вот что я записал:',
+    `🌍 Таймзона: ${result.timezone}`,
+    `☀️ Утренний план: ${result.morning_time}`,
+    `🌙 Конец дня: ${result.end_of_day_time}`,
+    `📅 Периоды:\n${periodLines}`,
+  ].join('\n')
+}
+
+export async function onboardingConversation(
+  conversation: OnboardingConversation,
+  ctx: BotContext,
+): Promise<void> {
+  const userId = ctx.from?.id
+  logger.info('[conversation/onboarding] start', { userId })
+
+  await ctx.reply(
+    'Привет! Я помогу настроить твоё расписание.\n\nДля начала — в каком городе или часовом поясе ты находишься?',
+  )
+
+  const history: ChatMessage[] = []
+  let result: InterviewResult | null = null
+  let round = 0
+
+  // LLM interview loop
+  while (true) {
+    round++
+    const userMsgCtx = await conversation.waitFor('message:text')
+    const userText = userMsgCtx.message.text
+
+    history.push({ role: 'user', content: userText })
+    logger.debug('[conversation/onboarding] round', { userId, round, historyLength: history.length })
+
+    const reply = await conversation.external(async () => continueInterview(history))
+
+    history.push({ role: 'assistant', content: reply })
+
+    // Strip the <data> block before sending to user
+    const displayReply = reply.replace(/<data>[\s\S]*?<\/data>/g, '').trim()
+    if (displayReply) {
+      await userMsgCtx.reply(displayReply)
+    }
+
+    result = parseInterviewResult(reply)
+    if (result) break
+  }
+
+  if (!result) {
+    logger.error('[conversation/onboarding] no result after loop', { userId })
+    await ctx.reply('Что-то пошло не так. Попробуй ещё раз — напиши /start')
+    return
+  }
+
+  logger.info('[conversation/onboarding] data received', {
+    userId,
+    timezone: result.timezone,
+    periodsCount: result.periods.length,
+  })
+
+  // Confirmation loop
+  while (true) {
+    const summary = formatSummary(result)
+    const confirmKeyboard = new InlineKeyboard()
+      .text('✅ Всё верно', 'confirm_yes')
+      .text('✏️ Исправить', 'confirm_no')
+
+    await ctx.reply(summary, { reply_markup: confirmKeyboard })
+
+    const confirmCtx = await conversation.waitForCallbackQuery(/^confirm_/)
+    await confirmCtx.answerCallbackQuery()
+
+    const choice = confirmCtx.callbackQuery.data
+    logger.info('[conversation/onboarding] confirmation choice', { userId, choice })
+
+    if (choice === 'confirm_yes') break
+
+    // User wants to correct — continue interview
+    history.push({ role: 'user', content: 'Нет, давай исправим. ' + (confirmCtx.from?.first_name ? 'Скажи что нужно изменить.' : '') })
+    await ctx.reply('Хорошо! Что именно хотим изменить?')
+
+    while (true) {
+      round++
+      const fixCtx = await conversation.waitFor('message:text')
+      const fixText = fixCtx.message.text
+
+      history.push({ role: 'user', content: fixText })
+      logger.debug('[conversation/onboarding] correction round', { userId, round })
+
+      const reply = await conversation.external(async () => continueInterview(history))
+      history.push({ role: 'assistant', content: reply })
+
+      const displayReply = reply.replace(/<data>[\s\S]*?<\/data>/g, '').trim()
+      if (displayReply) {
+        await fixCtx.reply(displayReply)
+      }
+
+      const newResult = parseInterviewResult(reply)
+      if (newResult) {
+        result = newResult
+        break
+      }
+    }
+  }
+
+  logger.info('[conversation/onboarding] confirmed by user', { userId })
+
+  // Google Calendar offer
+  const calendarKeyboard = new InlineKeyboard()
+    .text('📅 Подключить', 'calendar_connect')
+    .text('Пропустить', 'calendar_skip')
+
+  await ctx.reply(
+    'Хочешь подключить Google Calendar? Тогда задачи будут автоматически добавляться в твой календарь.',
+    { reply_markup: calendarKeyboard },
+  )
+
+  const calendarCtx = await conversation.waitForCallbackQuery(/^calendar_/)
+  await calendarCtx.answerCallbackQuery()
+
+  const calendarChoice = calendarCtx.callbackQuery.data
+  logger.info('[conversation/onboarding] calendar choice', { userId, calendarChoice })
+
+  if (calendarChoice === 'calendar_connect') {
+    await ctx.reply('Ссылка для подключения будет доступна после полного запуска сервиса. Пока что пропустим.')
+  }
+
+  // Save to DB
+  logger.info('[conversation/onboarding] saving to DB', { userId, periodsCount: result.periods.length })
+
+  const telegramId = ctx.from!.id
+
+  const user = await conversation.external(async () => {
+    const existing = await getUserByTelegramId(telegramId)
+    if (existing) {
+      return updateUser(existing.id, {
+        timezone: result!.timezone,
+        morning_time: result!.morning_time,
+        end_of_day_time: result!.end_of_day_time,
+      })
+    }
+    return createUser({
+      telegram_id: telegramId,
+      timezone: result!.timezone,
+      morning_time: result!.morning_time,
+      end_of_day_time: result!.end_of_day_time,
+    })
+  })
+
+  await conversation.external(async () => {
+    await createPeriods(
+      result!.periods.map((p, i) => ({
+        user_id: user.id,
+        name: p.name,
+        slug: p.slug,
+        start_time: p.start_time,
+        end_time: p.end_time,
+        days_of_week: p.days_of_week,
+        order_index: i,
+      })),
+    )
+  })
+
+  await conversation.external(async () => {
+    registerUserCrons(user)
+  })
+
+  logger.info('[conversation/onboarding] saved to DB', { userId: user.id, periodsCount: result.periods.length })
+
+  await ctx.reply('Готово! Жду тебя утром ☀️\n\nЕсли захочешь изменить настройки — напиши /settings')
+}

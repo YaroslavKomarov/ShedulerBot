@@ -48,7 +48,7 @@ export async function syncDayPlan(
         calendarId: 'primary',
         timeMin: `${startDateTime}${timezone === 'UTC' ? 'Z' : ''}`,
         timeMax: `${date}T23:59:59Z`,
-        privateExtendedProperty: `${SCHEDULERBOT_KEY}=${period.slug}`,
+        privateExtendedProperty: [`${SCHEDULERBOT_KEY}=${period.slug}`],
         singleEvents: true,
         maxResults: 1,
       })

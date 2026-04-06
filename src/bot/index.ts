@@ -12,10 +12,9 @@ import { getTaskQueue, updateTask } from '../db/tasks.js'
 import { getTodayInTimezone } from '../cron/morning-plan.js'
 import { sendNextRescheduleTask } from '../cron/retrospective.js'
 
-// Session data (will be populated in later steps)
-interface SessionData {
-  // Placeholder — conversation state is managed by the conversations plugin
-}
+// Session data (conversation state is managed by the conversations plugin)
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+interface SessionData {}
 
 export type BotContext = Context & SessionFlavor<SessionData> & ConversationFlavor<Context & SessionFlavor<SessionData>>
 
@@ -112,7 +111,7 @@ bot.callbackQuery(/^done:(.+)$/, async (ctx) => {
     const updated = await updateTask(taskId, { status: 'done' })
     await ctx.answerCallbackQuery({ text: '✅ Отмечено!' })
     await ctx.editMessageText(`✅ Выполнено: ${updated.title}`)
-  } catch (err) {
+  } catch (_err) {
     logger.warn('[bot] done callback: task not found', { userId: telegramId, taskId })
     await ctx.answerCallbackQuery({ text: 'Задача не найдена 🤷' })
   }

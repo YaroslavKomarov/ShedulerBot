@@ -6,27 +6,6 @@ vi.mock('../../lib/logger.js', () => ({
 
 // Mock the supabase client
 const mockSingle = vi.fn()
-const mockSelect = vi.fn()
-const mockInsert = vi.fn()
-const mockUpdate = vi.fn()
-const mockEq = vi.fn()
-const mockIs = vi.fn()
-const mockIlike = vi.fn()
-const mockOr = vi.fn()
-const mockOrder = vi.fn()
-
-// Build a chainable query mock
-function buildChain(terminal: () => unknown) {
-  const chain: Record<string, unknown> = {}
-  const fns = ['select', 'insert', 'update', 'eq', 'is', 'ilike', 'or', 'order', 'single', 'maybeSingle']
-  for (const fn of fns) {
-    chain[fn] = vi.fn(() => chain)
-  }
-  // Override terminal methods to return actual data
-  chain['single'] = mockSingle
-  chain['select'] = vi.fn(() => chain)
-  return chain
-}
 
 const mockChain = {
   select: vi.fn(),
@@ -129,13 +108,7 @@ describe('updateTask', () => {
 
 describe('getTaskQueue', () => {
   it('queries with status, date filter, and priority sort', async () => {
-    // Override select chain to return data directly
     const mockData = [MOCK_TASK]
-    const terminalChain = {
-      ...mockChain,
-      order: vi.fn().mockReturnThis(),
-    }
-    // last .order() resolves the query
     let orderCallCount = 0
     vi.mocked(mockChain.order).mockImplementation(() => {
       orderCallCount++
@@ -145,7 +118,7 @@ describe('getTaskQueue', () => {
       return mockChain
     })
 
-    const result = await getTaskQueue('user-1', null, '2026-04-06')
+    await getTaskQueue('user-1', null, '2026-04-06')
 
     expect(mockFrom).toHaveBeenCalledWith('sch_tasks')
     expect(mockChain.eq).toHaveBeenCalledWith('user_id', 'user-1')

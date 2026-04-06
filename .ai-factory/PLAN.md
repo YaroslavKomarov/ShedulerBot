@@ -1,135 +1,67 @@
-# Implementation Plan: Шаг 8 — Голосовые сообщения
+# Implementation Plan: Шаг 9 — CI/CD (GitHub Actions)
 
 Branch: master
 Created: 2026-04-07
 
 ## Settings
-- Testing: yes
-- Logging: structured via `src/lib/logger.ts`, LOG_LEVEL env var
+- Testing: yes (already exists — 80 tests passing)
+- Logging: standard
+- Docs: no
 
----
+## Current State
+
+- `npm test` — ✅ 80 tests passing across 11 files (vitest)
+- `typecheck` / `lint` scripts — ❌ missing from package.json
+- ESLint — ❌ not installed (not in devDependencies)
+- `.github/workflows/ci.yml` — ❌ doesn't exist
+- Branch protection — requires manual setup in GitHub UI
+
+## Commit Plan
+
+- **Commit 1** (after tasks 1–4): `chore: add ESLint, typecheck scripts, and GitHub Actions CI workflow`
 
 ## Tasks
 
-### Phase 1: Модель + Middleware
-- [x] Task 1: Добавить `WHISPER_MODEL` в `src/llm/client.ts` и реализовать `src/bot/middleware/voice.ts`
-- [x] Task 2: Рефакторинг `src/bot/handlers.ts` — выделить `handleText(ctx, text)`
+### Phase 1: Scripts & Tooling
 
-### Phase 2: Интеграция
-- [x] Task 3: Подключить voice handler в `src/bot/index.ts`
+- [ ] Task 1: Add `typecheck` and `lint` scripts to `package.json`
+  - Add `"typecheck": "tsc --noEmit"` script
+  - Add `"lint": "eslint src"` script
+  - Files: `package.json`
 
-### Phase 3: Тесты
-- [x] Task 4: Написать тесты `src/bot/__tests__/voice.test.ts`
+- [ ] Task 2: Install and configure ESLint for TypeScript
+  - Install devDependencies: `eslint`, `typescript-eslint`
+  - Create `eslint.config.js` (flat config, ESLint v9+)
+  - Configure: TypeScript parser + recommended rules, ignore `dist/` and `node_modules/`
+  - Run `npm run lint` — fix any errors found in `src/`
+  - LOGGING: no special logging needed (build-time tool)
+  - Files: `eslint.config.js`, `package.json`
 
----
+### Phase 2: CI Workflow
 
-## Task Details
+- [ ] Task 3: Create `.github/workflows/ci.yml`
+  - Trigger: `pull_request` targeting `main` branch
+  - Job: `ci` running on `ubuntu-latest`
+  - Steps:
+    1. `actions/checkout@v4`
+    2. `actions/setup-node@v4` — Node.js 20, npm cache
+    3. `npm ci` — clean install
+    4. `npm run typecheck` — TypeScript type check
+    5. `npm run lint` — ESLint
+    6. `npm test` — vitest run
+  - Files: `.github/workflows/ci.yml`
 
-### Task 1: WHISPER_MODEL + `src/bot/middleware/voice.ts`
+### Phase 3: Verification & Protection
 
-**`src/llm/client.ts`** — добавить константу после STRONG_MODEL:
-```typescript
-// Whisper: audio transcription
-export const WHISPER_MODEL = 'openai/whisper-large-v3'
-```
+- [ ] Task 4: Verify all CI steps pass locally
+  - Run `npm run typecheck` → must exit 0
+  - Run `npm run lint` → must exit 0 (fix any lint errors)
+  - Run `npm test` → must exit 0 (80 tests passing)
 
-**`src/bot/middleware/voice.ts`** — функция транскрибирования голосового сообщения.
-
-**Алгоритм:**
-1. Получить `file_id` из `ctx.message.voice.file_id`
-2. Вызвать `ctx.getFile()` → получить `file_path`
-3. Скачать OGG буфер через `fetch`:
-   ```
-   https://api.telegram.org/file/bot${token}/${file_path}
-   ```
-4. Создать `File` из буфера (имя `voice.ogg`, тип `audio/ogg`)
-5. Вызвать `llmClient.audio.transcriptions.create({ model: WHISPER_MODEL, file })` через OpenRouter
-6. Вернуть транскрипцию (`transcription.text`)
-
-**Интерфейс:**
-```typescript
-export async function transcribeVoice(ctx: BotContext): Promise<string>
-// Выбрасывает ошибку если транскрипция не удалась
-```
-
-**LOGGING:**
-- `[voice] transcribeVoice start` `{ userId, fileId }` — DEBUG
-- `[voice] file downloaded` `{ userId, fileId, sizeBytes }` — DEBUG
-- `[voice] transcription done` `{ userId, charCount }` — INFO
-- `[voice] transcription failed` `{ userId, error }` — ERROR
-
-Files: `src/llm/client.ts`, `src/bot/middleware/voice.ts`
-
----
-
-### Task 2: Рефакторинг `src/bot/handlers.ts`
-
-Текущий `handleFreeText` читает текст напрямую из `ctx.message.text`. Нужно вынести логику в отдельную экспортируемую функцию, чтобы её можно было вызвать с произвольным текстом (из голосового сообщения).
-
-**Изменения:**
-1. Переименовать внутреннюю логику в `handleText(ctx: BotContext, text: string): Promise<void>`
-   - Принимает текст как параметр вместо чтения из `ctx.message.text`
-   - Экспортировать
-2. `handleFreeText` остаётся как обёртка:
-   ```typescript
-   export async function handleFreeText(ctx: BotContext): Promise<void> {
-     if (!ctx.from || !ctx.message?.text) return
-     await handleText(ctx, ctx.message.text)
-   }
-   ```
-
-**LOGGING:** не менять — все логи уже внутри `handleText`.
-
-Files: `src/bot/handlers.ts`
-
----
-
-### Task 3: Voice handler в `src/bot/index.ts`
-
-Добавить обработчик `message:voice` **перед** строкой `bot.on('message:text', handleFreeText)`.
-
-```typescript
-import { transcribeVoice } from './middleware/voice.js'
-import { handleText } from './handlers.js'
-
-// Voice message handler — must be before the text handler
-bot.on('message:voice', async (ctx) => {
-  logger.info('[bot] voice message received', { userId: ctx.from?.id })
-  try {
-    const transcription = await transcribeVoice(ctx)
-    logger.info('[bot] voice transcribed, routing as text', {
-      userId: ctx.from?.id,
-      charCount: transcription.length,
-    })
-    await handleText(ctx, transcription)
-  } catch (err) {
-    logger.error('[bot] voice transcription failed', {
-      userId: ctx.from?.id,
-      error: err instanceof Error ? err.message : String(err),
-    })
-    await ctx.reply('Не удалось распознать голосовое сообщение, попробуй текстом.')
-  }
-})
-```
-
-Files: `src/bot/index.ts`
-
----
-
-### Task 4: Тесты `src/bot/__tests__/voice.test.ts`
-
-**Vitest, vi.mock для `llmClient` и Telegram Bot API.**
-
-**Настройка:**
-- Mock `ctx.getFile()` → `{ file_path: 'voice/file_123.ogg' }`
-- Mock `fetch` → возвращает ArrayBuffer с фейковыми байтами
-- Mock `llmClient.audio.transcriptions.create` → `{ text: 'купить молоко' }`
-- `process.env.TELEGRAM_BOT_TOKEN = 'test_token'`
-
-**Тесты `transcribeVoice`:**
-- Test: успешная транскрипция → возвращает строку из `transcription.text`
-- Test: `ctx.getFile()` бросает ошибку → `transcribeVoice` пробрасывает её
-- Test: `fetch` возвращает non-ok статус → бросает ошибку с кодом статуса
-- Test: `llmClient.audio.transcriptions.create` бросает ошибку → пробрасывает её
-
-Files: `src/bot/__tests__/voice.test.ts`
+- [ ] Task 5: Configure branch protection on `main` in GitHub (manual)
+  - Go to: GitHub repo → Settings → Branches → Add branch protection rule
+  - Branch name pattern: `main`
+  - Enable: "Require status checks to pass before merging"
+  - Add status check: `ci` (the job name from ci.yml)
+  - Enable: "Require branches to be up to date before merging"
+  - NOTE: This is a manual step in GitHub UI — no code changes required

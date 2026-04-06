@@ -87,8 +87,8 @@ describe('transcribeVoice', () => {
     const callArg = mockTranscribe.mock.calls[0][0]
     expect(callArg.model).toBe('openai/whisper-large-v3')
     expect(callArg.file).toBeInstanceOf(File)
-    expect(callArg.file.name).toBe('voice.ogg')
-    expect(callArg.file.type).toBe('audio/ogg')
+    expect((callArg.file as File).name).toBe('voice.ogg')
+    expect((callArg.file as File).type).toBe('audio/ogg')
   })
 
   it('throws when ctx.getFile() throws', async () => {

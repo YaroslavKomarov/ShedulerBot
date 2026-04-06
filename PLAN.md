@@ -193,21 +193,21 @@
 
 ---
 
-## Шаг 9 — CI/CD (GitHub Actions)
+## Шаг 9 — CI/CD (GitHub Actions) ✅
 
 **Цель:** тесты автоматически гоняются на каждый PR, merge в main только при зелёном CI.
 
-- [ ] Создать `.github/workflows/ci.yml`:
+- [x] Создать `.github/workflows/ci.yml`:
   - Триггер: `pull_request` → ветки `main`
   - Node.js 20, установка зависимостей (`npm ci`)
   - Проверка типов: `npx tsc --noEmit`
   - Линтер: `npm run lint` (если настроен)
   - Тесты: `npm test`
-- [ ] Добавить скрипты в `package.json`: `"test"`, `"lint"`, `"typecheck"`
-- [ ] Написать базовые unit-тесты для критичной логики:
+- [x] Добавить скрипты в `package.json`: `"test"`, `"lint"`, `"typecheck"`
+- [x] Написать базовые unit-тесты для критичной логики:
   - Сортировка очереди задач (urgent → deadline → created_at)
   - Парсинг дней недели и времён периодов
-- [ ] Настроить branch protection на `main` в GitHub: require status checks before merging
+- [x] Настроить branch protection на `main` в GitHub: require status checks before merging
 
 ---
 
@@ -239,6 +239,6 @@
 | 6 — Ретроспектива | `[x]` ✅ |
 | 7 — Внешний API | `[x]` ✅ |
 | 8 — Голосовые сообщения | `[x]` ✅ |
-| 9 — CI/CD (GitHub Actions) | `[ ]` |
+| 9 — CI/CD (GitHub Actions) | `[x]` ✅ |
 | 10 — Деплой на Railway | `[ ]` |
 | Settings (опционально) | `[ ]` |

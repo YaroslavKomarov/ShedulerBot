@@ -14,6 +14,11 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL
 async function main(): Promise<void> {
   const app = express()
   app.use(express.json())
+
+  app.get('/health', (_req, res) => {
+    res.json({ status: 'ok', uptime: process.uptime() })
+  })
+
   app.use('/auth', authRouter)
   app.use('/api', tasksRouter)
 
@@ -36,6 +41,7 @@ async function main(): Promise<void> {
 
   const server = app.listen(PORT, () => {
     logger.info('[app] Express listening', { port: PORT, env: NODE_ENV })
+    logger.info('[app] Health check endpoint registered', { path: '/health' })
   })
 
   // Register cron jobs for all existing users

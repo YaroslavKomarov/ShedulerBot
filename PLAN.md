@@ -186,10 +186,15 @@
 
 **Цель:** пользователь может отправлять голосовые сообщения вместо текста — бот транскрибирует и обрабатывает их как обычный текст.
 
-- [x] Реализовать `src/bot/middleware/voice.ts` — скачать `.ogg` файл через Bot API, отправить в Whisper (OpenRouter), вернуть транскрипцию
-- [x] Подключить middleware в `src/bot/index.ts` перед catch-all обработчиком: `message:voice` → транскрибировать → передать текст в `handleText()`
-- [x] Добавить константу модели Whisper в `src/llm/client.ts`
-- [x] Обработка ошибок: если транскрипция не удалась — ответить "Не удалось распознать голосовое сообщение, попробуй текстом"
+- [x] Реализовать `src/bot/middleware/voice.ts` — скачать `.ogg` файл через Bot API, отправить в Whisper, вернуть транскрипцию
+- [x] Подключить middleware в `src/bot/index.ts` перед catch-all обработчиком
+- [x] Создать `src/bot/conversations/helpers.ts` → `waitForText()` — принимает text и voice внутри conversations
+- [x] Обновить `onboarding.ts` и `add-task.ts` — заменить `waitFor('message:text')` на `waitForText()`
+- [x] Обработка ошибок транскрипции
+- [x] **Выбрать провайдера транскрипции** — Groq (дефолт, бесплатный, whisper-large-v3); OpenAI как альтернатива; настраивается через `WHISPER_PROVIDER=groq|openai`
+- [x] Добавить `language: 'ru'` в запрос транскрипции (настраивается через `WHISPER_LANGUAGE`)
+
+> Контекст для отдельного чата: `.ai-factory/voice-transcription-context.md`
 
 ---
 

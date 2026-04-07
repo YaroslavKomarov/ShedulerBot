@@ -4,7 +4,9 @@ import type { BotContext } from '../index.js'
 
 type OnboardingConversation = Conversation<BotContext, BotContext>
 import { continueInterview, parseInterviewResult, type ChatMessage, type InterviewResult } from '../../llm/interview.js'
+import { waitForText } from './helpers.js'
 import { getUserByTelegramId, createUser, updateUser } from '../../db/users.js'
+import { getAuthUrl } from '../../calendar/auth.js'
 import { createPeriods } from '../../db/periods.js'
 import { registerUserCrons } from '../../cron/manager.js'
 import { logger } from '../../lib/logger.js'
@@ -46,8 +48,7 @@ export async function onboardingConversation(
   // LLM interview loop
   while (true) {
     round++
-    const userMsgCtx = await conversation.waitFor('message:text')
-    const userText = userMsgCtx.message.text
+    const { ctx: userMsgCtx, text: userText } = await waitForText(conversation)
 
     history.push({ role: 'user', content: userText })
     logger.debug('[conversation/onboarding] round', { userId, round, historyLength: history.length })
@@ -101,8 +102,7 @@ export async function onboardingConversation(
 
     while (true) {
       round++
-      const fixCtx = await conversation.waitFor('message:text')
-      const fixText = fixCtx.message.text
+      const { ctx: fixCtx, text: fixText } = await waitForText(conversation)
 
       history.push({ role: 'user', content: fixText })
       logger.debug('[conversation/onboarding] correction round', { userId, round })
@@ -125,27 +125,7 @@ export async function onboardingConversation(
 
   logger.info('[conversation/onboarding] confirmed by user', { userId })
 
-  // Google Calendar offer
-  const calendarKeyboard = new InlineKeyboard()
-    .text('📅 Подключить', 'calendar_connect')
-    .text('Пропустить', 'calendar_skip')
-
-  await ctx.reply(
-    'Хочешь подключить Google Calendar? Тогда задачи будут автоматически добавляться в твой календарь.',
-    { reply_markup: calendarKeyboard },
-  )
-
-  const calendarCtx = await conversation.waitForCallbackQuery(/^calendar_/)
-  await calendarCtx.answerCallbackQuery()
-
-  const calendarChoice = calendarCtx.callbackQuery.data
-  logger.info('[conversation/onboarding] calendar choice', { userId, calendarChoice })
-
-  if (calendarChoice === 'calendar_connect') {
-    await ctx.reply('Ссылка для подключения будет доступна после полного запуска сервиса. Пока что пропустим.')
-  }
-
-  // Save to DB
+  // Save to DB first — need user.id for the Google Calendar OAuth URL
   logger.info('[conversation/onboarding] saving to DB', { userId, periodsCount: result.periods.length })
 
   const telegramId = ctx.from!.id
@@ -186,6 +166,51 @@ export async function onboardingConversation(
   })
 
   logger.info('[conversation/onboarding] saved to DB', { userId: user.id, periodsCount: result.periods.length })
+
+  // Google Calendar offer
+  const calendarKeyboard = new InlineKeyboard()
+    .text('📅 Подключить', 'calendar_connect')
+    .text('Пропустить', 'calendar_skip')
+
+  await ctx.reply(
+    'Хочешь подключить Google Calendar? Тогда задачи будут автоматически добавляться в твой календарь.',
+    { reply_markup: calendarKeyboard },
+  )
+
+  const calendarCtx = await conversation.waitForCallbackQuery(/^calendar_/)
+  await calendarCtx.answerCallbackQuery()
+
+  const calendarChoice = calendarCtx.callbackQuery.data
+  logger.info('[conversation/onboarding] calendar choice', { userId, calendarChoice })
+
+  if (calendarChoice === 'calendar_connect') {
+    const hasGoogleConfig = !!(
+      process.env.GOOGLE_CLIENT_ID &&
+      process.env.GOOGLE_CLIENT_SECRET &&
+      process.env.GOOGLE_REDIRECT_URI
+    )
+
+    if (hasGoogleConfig) {
+      try {
+        const authUrl = getAuthUrl(user.id)
+        const doneKeyboard = new InlineKeyboard().text('Готово / Пропустить', 'calendar_done')
+        await ctx.reply(
+          `Для подключения Google Calendar перейди по ссылке:\n${authUrl}\n\nПосле авторизации нажми кнопку ниже.`,
+          { reply_markup: doneKeyboard },
+        )
+        const doneCtx = await conversation.waitForCallbackQuery(/^calendar_done$/)
+        await doneCtx.answerCallbackQuery()
+      } catch (err) {
+        logger.error('[conversation/onboarding] getAuthUrl failed', {
+          userId: user.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        await ctx.reply('Не удалось получить ссылку для подключения. Настроить можно позже через /settings')
+      }
+    } else {
+      await ctx.reply('Google Calendar временно недоступен. Настроить можно позже через /settings')
+    }
+  }
 
   await ctx.reply('Готово! Жду тебя утром ☀️\n\nЕсли захочешь изменить настройки — напиши /settings')
 }

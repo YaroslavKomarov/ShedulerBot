@@ -1,0 +1,384 @@
+import type OpenAI from 'openai'
+import { llmClient, STRONG_MODEL, LLMInsufficientCreditsError } from './client.js'
+import { getUserPeriods, getPeriodsForDay } from '../db/periods.js'
+import { getTasksByDate, getBacklog, getTaskQueue, createTask, findTasksByTitle, updateTask } from '../db/tasks.js'
+import { logger } from '../lib/logger.js'
+import type { DbUser } from '../types/index.js'
+import type { ChatMessage } from '../db/chat-history.js'
+
+// Tool definitions for the LLM
+const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'get_periods',
+      description: 'Получить все периоды активности пользователя (имя, слаг, время начала/конца, дни недели)',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_periods_for_day',
+      description: 'Получить периоды активности для конкретного дня недели (0=вс, 1=пн, 2=вт, 3=ср, 4=чт, 5=пт, 6=сб)',
+      parameters: {
+        type: 'object',
+        properties: {
+          day_of_week: {
+            type: 'number',
+            description: 'День недели: 0=вс, 1=пн, 2=вт, 3=ср, 4=чт, 5=пт, 6=сб',
+          },
+        },
+        required: ['day_of_week'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_tasks_by_date',
+      description: 'Получить все задачи запланированные на конкретную дату',
+      parameters: {
+        type: 'object',
+        properties: {
+          date: { type: 'string', description: 'Дата в формате YYYY-MM-DD' },
+        },
+        required: ['date'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_backlog',
+      description: 'Получить задачи без запланированной даты (бэклог). Можно фильтровать по слагу периода.',
+      parameters: {
+        type: 'object',
+        properties: {
+          period_slug: {
+            type: 'string',
+            description: 'Слаг периода для фильтрации (опционально)',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_task_queue',
+      description: 'Получить очередь задач для периода на дату с учётом приоритетов (срочные → с дедлайном → остальные)',
+      parameters: {
+        type: 'object',
+        properties: {
+          period_slug: {
+            type: 'string',
+            description: 'Слаг периода (null — все периоды)',
+          },
+          date: { type: 'string', description: 'Дата в формате YYYY-MM-DD' },
+        },
+        required: ['date'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_task',
+      description: 'Создать новую задачу. Если period_slug или scheduled_date не указаны — сначала уточни у пользователя, не вызывай инструмент с пустыми значениями.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Название задачи' },
+          period_slug: { type: 'string', description: 'Слаг периода (опционально)' },
+          scheduled_date: { type: 'string', description: 'Дата в формате YYYY-MM-DD (опционально)' },
+          is_urgent: { type: 'boolean', description: 'Срочная ли задача (опционально)' },
+          deadline_date: { type: 'string', description: 'Дедлайн в формате YYYY-MM-DD (опционально)' },
+          estimated_minutes: { type: 'number', description: 'Оценка времени в минутах (опционально)' },
+        },
+        required: ['title'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_task',
+      description: 'Обновить задачу. Сначала ищет задачу по названию через title_query, затем применяет обновления.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title_query: { type: 'string', description: 'Часть названия задачи для поиска' },
+          updates: {
+            type: 'object',
+            description: 'Поля для обновления',
+            properties: {
+              title: { type: 'string' },
+              period_slug: { type: 'string' },
+              scheduled_date: { type: 'string' },
+              is_urgent: { type: 'boolean' },
+              deadline_date: { type: 'string' },
+              estimated_minutes: { type: 'number' },
+              status: { type: 'string', enum: ['pending', 'done', 'cancelled'] },
+            },
+          },
+        },
+        required: ['title_query', 'updates'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cancel_task',
+      description: 'Отменить задачу. Ищет по названию и устанавливает status=cancelled.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title_query: { type: 'string', description: 'Часть названия задачи для поиска' },
+        },
+        required: ['title_query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mark_done',
+      description: 'Отметить задачу выполненной. Ищет по названию и устанавливает status=done.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title_query: { type: 'string', description: 'Часть названия задачи для поиска' },
+        },
+        required: ['title_query'],
+      },
+    },
+  },
+]
+
+async function executeTool(
+  userId: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  logger.debug('[llm/agent] executeTool', { userId, name, args })
+
+  switch (name) {
+    case 'get_periods':
+      return getUserPeriods(userId)
+
+    case 'get_periods_for_day': {
+      const day = args['day_of_week']
+      if (typeof day !== 'number') throw new Error('day_of_week must be a number')
+      return getPeriodsForDay(userId, day)
+    }
+
+    case 'get_tasks_by_date': {
+      const date = args['date']
+      if (typeof date !== 'string') throw new Error('date must be a string')
+      return getTasksByDate(userId, date)
+    }
+
+    case 'get_backlog': {
+      const slug = args['period_slug']
+      return getBacklog(userId, typeof slug === 'string' ? slug : undefined)
+    }
+
+    case 'get_task_queue': {
+      const date = args['date']
+      if (typeof date !== 'string') throw new Error('date must be a string')
+      const slug = args['period_slug']
+      return getTaskQueue(userId, typeof slug === 'string' ? slug : null, date)
+    }
+
+    case 'add_task': {
+      const title = args['title']
+      if (typeof title !== 'string' || !title) throw new Error('title must be a non-empty string')
+
+      const periodSlug = typeof args['period_slug'] === 'string' ? args['period_slug'] : null
+      const scheduledDate = typeof args['scheduled_date'] === 'string' ? args['scheduled_date'] : null
+      const isUrgent = typeof args['is_urgent'] === 'boolean' ? args['is_urgent'] : false
+      const deadlineDate = typeof args['deadline_date'] === 'string' ? args['deadline_date'] : null
+      const estimatedMinutes = typeof args['estimated_minutes'] === 'number' ? args['estimated_minutes'] : null
+
+      logger.debug('[llm/agent] tool:add_task', { title, period_slug: periodSlug, scheduled_date: scheduledDate })
+
+      const task = await createTask({
+        user_id: userId,
+        title,
+        period_slug: periodSlug,
+        scheduled_date: scheduledDate,
+        is_urgent: isUrgent,
+        deadline_date: deadlineDate,
+        estimated_minutes: estimatedMinutes,
+        source: 'user',
+      })
+
+      logger.info('[llm/agent] task created', { taskId: task.id, title: task.title })
+      return { id: task.id, title: task.title, status: task.status }
+    }
+
+    case 'update_task': {
+      const titleQuery = args['title_query']
+      if (typeof titleQuery !== 'string' || !titleQuery) throw new Error('title_query must be a non-empty string')
+
+      const updates = args['updates']
+      if (typeof updates !== 'object' || updates === null) throw new Error('updates must be an object')
+
+      const matches = await findTasksByTitle(userId, titleQuery)
+      if (matches.length === 0) return { error: `Задача не найдена: ${titleQuery}` }
+
+      const task = matches[0]
+      const updatesObj = updates as Record<string, unknown>
+      const patch: Record<string, unknown> = {}
+      if (updatesObj['title'] !== undefined) patch['title'] = updatesObj['title']
+      if (updatesObj['period_slug'] !== undefined) patch['period_slug'] = updatesObj['period_slug']
+      if (updatesObj['scheduled_date'] !== undefined) patch['scheduled_date'] = updatesObj['scheduled_date']
+      if (updatesObj['is_urgent'] !== undefined) patch['is_urgent'] = updatesObj['is_urgent']
+      if (updatesObj['deadline_date'] !== undefined) patch['deadline_date'] = updatesObj['deadline_date']
+      if (updatesObj['estimated_minutes'] !== undefined) patch['estimated_minutes'] = updatesObj['estimated_minutes']
+      if (updatesObj['status'] !== undefined) patch['status'] = updatesObj['status']
+
+      const updated = await updateTask(task.id, patch)
+      logger.info('[llm/agent] task updated', { taskId: updated.id, title: updated.title, patch })
+      return { id: updated.id, title: updated.title, status: updated.status }
+    }
+
+    case 'cancel_task': {
+      const titleQuery = args['title_query']
+      if (typeof titleQuery !== 'string' || !titleQuery) throw new Error('title_query must be a non-empty string')
+
+      const matches = await findTasksByTitle(userId, titleQuery)
+      if (matches.length === 0) return { error: `Задача не найдена: ${titleQuery}` }
+
+      const task = matches[0]
+      const updated = await updateTask(task.id, { status: 'cancelled' })
+      logger.info('[llm/agent] task cancelled', { taskId: updated.id, title: updated.title })
+      return { id: updated.id, title: updated.title, status: updated.status }
+    }
+
+    case 'mark_done': {
+      const titleQuery = args['title_query']
+      if (typeof titleQuery !== 'string' || !titleQuery) throw new Error('title_query must be a non-empty string')
+
+      const matches = await findTasksByTitle(userId, titleQuery)
+      if (matches.length === 0) return { error: `Задача не найдена: ${titleQuery}` }
+
+      const task = matches[0]
+      const updated = await updateTask(task.id, { status: 'done' })
+      logger.info('[llm/agent] task marked done', { taskId: updated.id, title: updated.title })
+      return { id: updated.id, title: updated.title, status: updated.status }
+    }
+
+    default:
+      throw new Error(`Unknown tool: ${name}`)
+  }
+}
+
+export async function handleAgentMessage(
+  user: DbUser,
+  userMessage: string,
+  history: ChatMessage[] = [],
+): Promise<string> {
+  const userId = user.id
+  const today = new Date().toISOString().split('T')[0]
+
+  logger.debug('[llm/agent] start', { userId, message: userMessage.slice(0, 60), historyLen: history.length })
+
+  const systemPrompt = `Ты — умный ассистент-планировщик. Ты обрабатываешь ВСЕ запросы пользователя: вопросы, создание задач, редактирование, отмену и завершение.
+Используй доступные инструменты для получения и изменения данных в базе.
+Если при создании задачи не хватает данных (период или дата) — задай уточняющий вопрос, не вызывай инструмент с пустыми значениями.
+Текущая дата: ${today}. Часовой пояс пользователя: ${user.timezone}.
+Отвечай кратко и по делу. Используй русский язык.`
+
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: 'system', content: systemPrompt },
+    ...history,
+    { role: 'user', content: userMessage },
+  ]
+
+  try {
+    // First call: LLM decides which tools to call (or answers directly)
+    const firstResponse = await llmClient.chat.completions.create({
+      model: STRONG_MODEL,
+      messages,
+      tools: TOOLS,
+      tool_choice: 'auto',
+      temperature: 0.3,
+    })
+
+    const firstMessage = firstResponse.choices[0]?.message
+    if (!firstMessage) throw new Error('LLM returned empty response')
+
+    // No tool calls — LLM answered directly (e.g. clarifying question)
+    if (!firstMessage.tool_calls || firstMessage.tool_calls.length === 0) {
+      const content = firstMessage.content ?? 'Не смог найти информацию.'
+      logger.debug('[llm/agent] answered without tools', { userId })
+      return content
+    }
+
+    logger.debug('[llm/agent] tool calls requested', {
+      userId,
+      tools: firstMessage.tool_calls.map((t) => t.function.name),
+    })
+
+    // Execute all tool calls
+    messages.push(firstMessage)
+
+    for (const toolCall of firstMessage.tool_calls) {
+      const fnName = toolCall.function.name
+      let args: Record<string, unknown> = {}
+      try {
+        args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
+      } catch {
+        logger.warn('[llm/agent] failed to parse tool args', { fnName, raw: toolCall.function.arguments })
+      }
+
+      let result: unknown
+      try {
+        result = await executeTool(userId, fnName, args)
+      } catch (err) {
+        result = { error: err instanceof Error ? err.message : String(err) }
+        logger.warn('[llm/agent] tool execution failed', { userId, tool: fnName, args, error: err instanceof Error ? err.message : String(err) })
+      }
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        content: JSON.stringify(result),
+      })
+    }
+
+    // Second call: LLM generates final answer with tool results
+    const finalResponse = await llmClient.chat.completions.create({
+      model: STRONG_MODEL,
+      messages,
+      temperature: 0.5,
+    })
+
+    const finalContent = finalResponse.choices[0]?.message?.content
+    if (!finalContent) throw new Error('LLM returned empty final response')
+
+    logger.debug('[llm/agent] done', {
+      userId,
+      tokens: finalResponse.usage?.total_tokens,
+    })
+
+    return finalContent
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error('[llm/agent] error', { userId, error: message })
+
+    if (err instanceof LLMInsufficientCreditsError) throw err
+
+    // Check for insufficient credits in error message
+    const lower = message.toLowerCase()
+    if (lower.includes('insufficient') || lower.includes('402') || lower.includes('credits')) {
+      throw new LLMInsufficientCreditsError()
+    }
+
+    return 'Не удалось получить информацию. Попробуй позже.'
+  }
+}

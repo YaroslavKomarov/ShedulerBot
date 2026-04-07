@@ -81,6 +81,38 @@ export type Database = {
           }
         ]
       }
+      sch_chat_history: {
+        Row: {
+          id: string
+          user_id: string
+          role: 'user' | 'assistant'
+          content: string
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          role: 'user' | 'assistant'
+          content: string
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          role?: 'user' | 'assistant'
+          content?: string
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: 'sch_chat_history_user_id_fkey'
+            columns: ['user_id']
+            isOneToOne: false
+            referencedRelation: 'sch_users'
+            referencedColumns: ['id']
+          }
+        ]
+      }
       sch_tasks: {
         Row: {
           id: string

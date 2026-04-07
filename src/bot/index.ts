@@ -1,9 +1,11 @@
 import { Bot, Context, session, SessionFlavor, InlineKeyboard } from 'grammy'
+import { LLMInsufficientCreditsError } from '../llm/client.js'
 import { conversations, createConversation, type ConversationFlavor } from '@grammyjs/conversations'
 import { logger } from '../lib/logger.js'
 import { getUserByTelegramId } from '../db/users.js'
+import { clearChatHistory } from '../db/chat-history.js'
 import { onboardingConversation } from './conversations/onboarding.js'
-import { addTaskConversation } from './conversations/add-task.js'
+import { settingsConversation } from './conversations/settings.js'
 import { handleFreeText, handleText } from './handlers.js'
 import { transcribeVoice } from './middleware/voice.js'
 import { sendPlanForDate, sendQueueForToday } from './plan-helper.js'
@@ -33,7 +35,7 @@ bot.use(conversations())
 
 // Register conversations
 bot.use(createConversation(onboardingConversation))
-bot.use(createConversation(addTaskConversation))
+bot.use(createConversation(settingsConversation))
 
 // /start command — route new users to onboarding, existing users to plan stub
 bot.command('start', async (ctx) => {
@@ -48,8 +50,15 @@ bot.command('start', async (ctx) => {
   if (isNew) {
     await ctx.conversation.enter('onboardingConversation')
   } else {
+    await clearChatHistory(user.id)
     await ctx.reply('С возвращением! Вот твой план на сегодня... (скоро)')
   }
+})
+
+// /settings — open settings menu
+bot.command('settings', async (ctx) => {
+  logger.info('[bot] /settings command', { userId: ctx.from?.id })
+  await ctx.conversation.enter('settingsConversation')
 })
 
 // /plan — show today's plan
@@ -187,6 +196,21 @@ bot.on('message:text', handleFreeText)
 
 // Global error handler — log without crashing
 bot.catch((err) => {
+  const cause = err.error
+  const isCreditsError =
+    cause instanceof LLMInsufficientCreditsError ||
+    (cause instanceof Error && cause.name === 'LLMInsufficientCreditsError') ||
+    (cause instanceof Error && cause.message === 'OpenRouter balance is insufficient')
+
+  if (isCreditsError) {
+    logger.warn('[bot] OpenRouter balance insufficient', { userId: err.ctx.from?.id })
+    void err.ctx.reply(
+      '⚠️ Недостаточно средств на OpenRouter.\n' +
+      'Пополни баланс на openrouter.ai и попробуй снова.'
+    )
+    return
+  }
+
   logger.error('[bot] Unhandled error', {
     error: err.message,
     update: err.ctx?.update,

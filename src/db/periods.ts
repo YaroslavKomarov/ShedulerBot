@@ -2,6 +2,41 @@ import { supabase } from './client.js'
 import type { DbPeriod, DbPeriodInsert } from '../types/index.js'
 import { logger } from '../lib/logger.js'
 
+export async function updatePeriod(id: string, data: Partial<DbPeriodInsert>): Promise<DbPeriod> {
+  logger.debug('[db/periods] updatePeriod', { id, data })
+
+  const { data: updated, error } = await supabase
+    .from('sch_periods')
+    .update(data)
+    .eq('id', id)
+    .select()
+    .single()
+
+  if (error) {
+    logger.error('[db/periods] updatePeriod error', { id, error: error.message })
+    throw new Error(`Failed to update period ${id}: ${error.message}`)
+  }
+
+  logger.info('[db/periods] updatePeriod done', { id })
+  return updated
+}
+
+export async function deletePeriod(id: string): Promise<void> {
+  logger.debug('[db/periods] deletePeriod', { id })
+
+  const { error } = await supabase
+    .from('sch_periods')
+    .delete()
+    .eq('id', id)
+
+  if (error) {
+    logger.error('[db/periods] deletePeriod error', { id, error: error.message })
+    throw new Error(`Failed to delete period ${id}: ${error.message}`)
+  }
+
+  logger.info('[db/periods] deletePeriod done', { id })
+}
+
 export async function createPeriods(periods: DbPeriodInsert[]): Promise<DbPeriod[]> {
   logger.debug('[db/periods] createPeriods', { userId: periods[0]?.user_id, count: periods.length })
 

@@ -93,10 +93,10 @@ describe('getTodayInTimezone', () => {
     expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
   })
 
-  it('returns a dayOfWeek between 0 and 6', () => {
+  it('returns a dayOfWeek between 1 and 7 (ISO: 1=Mon, 7=Sun)', () => {
     const { dayOfWeek } = getTodayInTimezone('UTC')
-    expect(dayOfWeek).toBeGreaterThanOrEqual(0)
-    expect(dayOfWeek).toBeLessThanOrEqual(6)
+    expect(dayOfWeek).toBeGreaterThanOrEqual(1)
+    expect(dayOfWeek).toBeLessThanOrEqual(7)
   })
 })
 

@@ -4,6 +4,7 @@ import { getUserPeriods, getPeriodsForDay, updatePeriod, deletePeriod, createPer
 import { getTasksByDate, getBacklog, getTaskQueue, createTask, findTasksByTitle, updateTask } from '../db/tasks.js'
 import { registerUserCrons, unregisterUserCrons } from '../cron/manager.js'
 import { logger } from '../lib/logger.js'
+import { getTodayInTimezone } from '../lib/date.js'
 import type { DbUser } from '../types/index.js'
 import type { ChatMessage } from '../db/chat-history.js'
 
@@ -446,7 +447,7 @@ export async function handleAgentMessage(
   history: ChatMessage[] = [],
 ): Promise<string> {
   const userId = user.id
-  const today = new Date().toISOString().split('T')[0]
+  const { date: today } = getTodayInTimezone(user.timezone)
 
   logger.debug('[llm/agent] start', { userId, message: userMessage.slice(0, 60), historyLen: history.length })
 

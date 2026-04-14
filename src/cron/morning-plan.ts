@@ -4,35 +4,12 @@ import { getTaskQueue, getBacklog } from '../db/tasks.js'
 import { generateDayPlanMessage } from '../llm/plan.js'
 import { syncDayPlan } from '../calendar/sync.js'
 import { logger } from '../lib/logger.js'
+import { getTodayInTimezone } from '../lib/date.js'
+export { getTodayInTimezone } from '../lib/date.js'
 import type { DbUser, DbTask, DbPeriod } from '../types/index.js'
 import type { PeriodPlan, TaskSlot } from '../llm/plan.js'
 
 const DEFAULT_TASK_MINUTES = 30
-
-/**
- * Returns current date string and day-of-week number (0=Sun…6=Sat) in the given timezone.
- */
-export function getTodayInTimezone(timezone: string): { date: string; dayOfWeek: number } {
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  })
-  const date = formatter.format(new Date())  // "YYYY-MM-DD" (en-CA locale)
-
-  const dayFormatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    weekday: 'short',
-  })
-  const dayName = dayFormatter.format(new Date())
-  const dayMap: Record<string, number> = {
-    Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
-  }
-  const dayOfWeek = dayMap[dayName] ?? new Date().getDay()
-
-  return { date, dayOfWeek }
-}
 
 /**
  * Adds minutes to a "HH:MM" time string, returns new "HH:MM".

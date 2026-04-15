@@ -1,6 +1,6 @@
 import { bot } from '../bot/index.js'
 import { getPeriodsForDay } from '../db/periods.js'
-import { getTaskQueue, getBacklog } from '../db/tasks.js'
+import { getTaskQueue, getBacklog, getUnassignedTodayTasks } from '../db/tasks.js'
 import { generateDayPlanMessage } from '../llm/plan.js'
 import { syncDayPlan } from '../calendar/sync.js'
 import { logger } from '../lib/logger.js'
@@ -122,6 +122,23 @@ export async function runMorningPlan(user: DbUser): Promise<void> {
       })
 
       periodPlans.push({ period, tasks: allTasks, slots })
+    }
+
+    // Include tasks scheduled for today but not assigned to any period.
+    // These are created by the agent when the LLM omits period_slug.
+    // We attach them to the first period so they appear in the morning plan.
+    const unassigned = await getUnassignedTodayTasks(user.id, date)
+    if (unassigned.length > 0 && periodPlans.length > 0) {
+      const firstPlan = periodPlans[0]
+      const seenIds = new Set(firstPlan.tasks.map((t) => t.id))
+      const newTasks = unassigned.filter((t) => !seenIds.has(t.id))
+      firstPlan.tasks = [...firstPlan.tasks, ...newTasks]
+      logger.info('[cron/morning-plan] attached unassigned today tasks to first period', {
+        userId: user.id,
+        count: newTasks.length,
+        periodSlug: firstPlan.period.slug,
+        taskTitles: newTasks.map((t) => t.title),
+      })
     }
 
     let message: string

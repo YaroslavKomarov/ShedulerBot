@@ -1,5 +1,5 @@
 import { bot } from '../bot/index.js'
-import { getTaskQueue } from '../db/tasks.js'
+import { getTaskQueue, getUnassignedTodayTasks } from '../db/tasks.js'
 import { getTodayInTimezone } from './morning-plan.js'
 import { logger } from '../lib/logger.js'
 import type { DbUser, DbPeriod } from '../types/index.js'
@@ -25,12 +25,15 @@ export async function sendPeriodPreview(user: DbUser, period: DbPeriod): Promise
   try {
     const { date } = getTodayInTimezone(user.timezone)
     const tasks = await getTaskQueue(user.id, period.slug, date)
-    const preview = tasks.slice(0, 5)
+    const unassigned = await getUnassignedTodayTasks(user.id, date)
+    const seenIds = new Set(tasks.map((t) => t.id))
+    const allTasks = [...tasks, ...unassigned.filter((t) => !seenIds.has(t.id))]
+    const preview = allTasks.slice(0, 5)
 
     const text =
       `⏰ Через 10 минут начинается *${period.name}* (${period.start_time}–${period.end_time})\n\n` +
       `Задачи:\n${formatTaskList(preview)}` +
-      (tasks.length > 5 ? `\n_...и ещё ${tasks.length - 5}_` : '')
+      (allTasks.length > 5 ? `\n_...и ещё ${allTasks.length - 5}_` : '')
 
     await bot.api.sendMessage(user.telegram_id, text, { parse_mode: 'Markdown' })
   } catch (err) {
@@ -52,9 +55,24 @@ export async function sendPeriodStart(user: DbUser, period: DbPeriod): Promise<v
     const { date } = getTodayInTimezone(user.timezone)
     const tasks = await getTaskQueue(user.id, period.slug, date)
 
+    // Also include tasks scheduled for today with no period assignment
+    const unassigned = await getUnassignedTodayTasks(user.id, date)
+    const seenIds = new Set(tasks.map((t) => t.id))
+    const extraTasks = unassigned.filter((t) => !seenIds.has(t.id))
+
+    const allTasks = [...tasks, ...extraTasks]
+
+    if (extraTasks.length > 0) {
+      logger.info('[cron/period-notify] sendPeriodStart: included unassigned today tasks', {
+        userId: user.id,
+        periodSlug: period.slug,
+        count: extraTasks.length,
+      })
+    }
+
     const text =
       `🚀 Начался период *${period.name}*!\n\n` +
-      `*План:*\n${formatTaskList(tasks)}`
+      `*План:*\n${formatTaskList(allTasks)}`
 
     await bot.api.sendMessage(user.telegram_id, text, { parse_mode: 'Markdown' })
   } catch (err) {

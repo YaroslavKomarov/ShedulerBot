@@ -88,18 +88,18 @@ const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'add_task',
-      description: 'Создать новую задачу. Если period_slug или scheduled_date не указаны — сначала уточни у пользователя, не вызывай инструмент с пустыми значениями.',
+      description: 'Создать новую задачу. Каждая задача обязана принадлежать периоду активности. Если period_slug не известен — сначала вызови get_periods и уточни у пользователя, в каком периоде выполнять задачу.',
       parameters: {
         type: 'object',
         properties: {
           title: { type: 'string', description: 'Название задачи' },
-          period_slug: { type: 'string', description: 'Слаг периода (опционально)' },
+          period_slug: { type: 'string', description: 'Слаг периода активности (обязательно)' },
           scheduled_date: { type: 'string', description: 'Дата в формате YYYY-MM-DD (опционально)' },
           is_urgent: { type: 'boolean', description: 'Срочная ли задача (опционально)' },
           deadline_date: { type: 'string', description: 'Дедлайн в формате YYYY-MM-DD (опционально)' },
           estimated_minutes: { type: 'number', description: 'Оценка времени в минутах (опционально)' },
         },
-        required: ['title'],
+        required: ['title', 'period_slug'],
       },
     },
   },
@@ -268,6 +268,7 @@ async function executeTool(
       if (typeof title !== 'string' || !title) throw new Error('title must be a non-empty string')
 
       const periodSlug = typeof args['period_slug'] === 'string' ? args['period_slug'] : null
+      if (!periodSlug) return { error: 'period_slug обязателен. Сначала вызови get_periods и уточни у пользователя, в каком периоде выполнять задачу.' }
       const scheduledDate = typeof args['scheduled_date'] === 'string' ? args['scheduled_date'] : null
       const isUrgent = typeof args['is_urgent'] === 'boolean' ? args['is_urgent'] : false
       const deadlineDate = typeof args['deadline_date'] === 'string' ? args['deadline_date'] : null

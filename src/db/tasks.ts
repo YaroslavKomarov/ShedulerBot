@@ -141,6 +141,28 @@ export async function findTaskByExternalId(
   return data
 }
 
+export async function getUnassignedTodayTasks(userId: string, date: string): Promise<DbTask[]> {
+  logger.debug('[db/tasks] getUnassignedTodayTasks', { userId, date })
+
+  const { data, error } = await supabase
+    .from('sch_tasks')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('status', 'pending')
+    .is('period_slug', null)
+    .eq('scheduled_date', date)
+    .order('is_urgent', { ascending: false })
+    .order('created_at', { ascending: true })
+
+  if (error) {
+    logger.error('[db/tasks] getUnassignedTodayTasks error', { userId, date, error: error.message })
+    throw new Error(`Failed to get unassigned tasks for user ${userId}: ${error.message}`)
+  }
+
+  logger.debug('[db/tasks] getUnassignedTodayTasks result', { userId, date, count: data.length })
+  return data
+}
+
 export async function findTasksByTitle(userId: string, query: string): Promise<DbTask[]> {
   logger.debug('[db/tasks] findTasksByTitle', { userId, query })
 

@@ -15,6 +15,7 @@ vi.mock('../../db/periods.js', () => ({
 vi.mock('../../db/tasks.js', () => ({
   getTaskQueue: vi.fn(),
   getBacklog: vi.fn(),
+  getUnassignedTodayTasks: vi.fn().mockResolvedValue([]),
 }))
 
 vi.mock('../../llm/plan.js', () => ({

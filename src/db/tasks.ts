@@ -67,7 +67,7 @@ export async function getTaskQueue(
     throw new Error(`Failed to get task queue for user ${userId}: ${error.message}`)
   }
 
-  logger.debug('[db/tasks] getTaskQueue result', { userId, count: data.length })
+  logger.info('[db/tasks] getTaskQueue result', { userId, periodSlug, date, count: data.length, ids: data.map((t) => t.id) })
   return data
 }
 

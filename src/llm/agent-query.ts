@@ -269,12 +269,22 @@ async function executeTool(
 
       const periodSlug = typeof args['period_slug'] === 'string' ? args['period_slug'] : null
       if (!periodSlug) return { error: 'period_slug обязателен. Сначала вызови get_periods и уточни у пользователя, в каком периоде выполнять задачу.' }
+
+      // Validate period_slug exists — prevents LLM from inventing slugs
+      const allPeriods = await getUserPeriods(userId)
+      const matchedPeriod = allPeriods.find((p) => p.slug === periodSlug)
+      if (!matchedPeriod) {
+        const available = allPeriods.map((p) => `${p.name} (slug: ${p.slug})`).join(', ')
+        logger.warn('[llm/agent] tool:add_task: unknown period_slug', { userId, periodSlug, available })
+        return { error: `Период со слагом "${periodSlug}" не найден. Доступные периоды: ${available}. Используй точный slug из этого списка.` }
+      }
+
       const scheduledDate = typeof args['scheduled_date'] === 'string' ? args['scheduled_date'] : null
       const isUrgent = typeof args['is_urgent'] === 'boolean' ? args['is_urgent'] : false
       const deadlineDate = typeof args['deadline_date'] === 'string' ? args['deadline_date'] : null
       const estimatedMinutes = typeof args['estimated_minutes'] === 'number' ? args['estimated_minutes'] : null
 
-      logger.debug('[llm/agent] tool:add_task', { title, period_slug: periodSlug, scheduled_date: scheduledDate })
+      logger.info('[llm/agent] tool:add_task', { title, period_slug: periodSlug, scheduled_date: scheduledDate })
 
       const task = await createTask({
         user_id: userId,
@@ -454,8 +464,12 @@ export async function handleAgentMessage(
 
   const systemPrompt = `Ты — умный ассистент-планировщик. Ты обрабатываешь ВСЕ запросы пользователя: вопросы, создание задач, редактирование, отмену и завершение, а также изменение периодов активности.
 Используй доступные инструменты для получения и изменения данных в базе.
-Если при создании задачи не хватает данных (период или дата) — задай уточняющий вопрос, не вызывай инструмент с пустыми значениями.
 Текущая дата: ${today}. Часовой пояс пользователя: ${user.timezone}.
+
+При создании задачи (add_task):
+1. ОБЯЗАТЕЛЬНО требуется period_slug — каждая задача должна принадлежать периоду активности.
+2. Если пользователь не указал период — сначала вызови get_periods, покажи список периодов и спроси в каком периоде выполнять задачу. Только после ответа вызывай add_task.
+3. Используй ТОЧНЫЙ slug из get_periods, не придумывай slug самостоятельно.
 
 При изменении периодов (update_period, delete_period, create_period):
 1. Сначала вызови get_periods чтобы получить актуальные данные.

@@ -485,74 +485,76 @@ export async function handleAgentMessage(
     { role: 'user', content: userMessage },
   ]
 
+  const MAX_ITERATIONS = 5
+
   try {
-    // First call: LLM decides which tools to call (or answers directly)
-    const firstResponse = await llmClient.chat.completions.create({
-      model: STRONG_MODEL,
-      messages,
-      tools: TOOLS,
-      tool_choice: 'auto',
-      temperature: 0.3,
-    })
+    // [FIX] Agentic loop: supports multi-round tool calling (e.g. get_periods → add_task).
+    // Previously only one round was allowed, so LLM couldn't call get_periods then add_task
+    // sequentially — tasks appeared to be created but were never saved to DB.
+    let iteration = 0
 
-    const firstMessage = firstResponse.choices[0]?.message
-    if (!firstMessage) throw new Error('LLM returned empty response')
+    while (iteration < MAX_ITERATIONS) {
+      iteration++
 
-    // No tool calls — LLM answered directly (e.g. clarifying question)
-    if (!firstMessage.tool_calls || firstMessage.tool_calls.length === 0) {
-      const content = firstMessage.content ?? 'Не смог найти информацию.'
-      logger.debug('[llm/agent] answered without tools', { userId })
-      return content
-    }
-
-    logger.debug('[llm/agent] tool calls requested', {
-      userId,
-      tools: firstMessage.tool_calls.map((t) => t.function.name),
-    })
-
-    // Execute all tool calls
-    messages.push(firstMessage)
-
-    for (const toolCall of firstMessage.tool_calls) {
-      const fnName = toolCall.function.name
-      let args: Record<string, unknown> = {}
-      try {
-        args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
-      } catch {
-        logger.warn('[llm/agent] failed to parse tool args', { fnName, raw: toolCall.function.arguments })
-      }
-
-      let result: unknown
-      try {
-        result = await executeTool(user, fnName, args)
-      } catch (err) {
-        result = { error: err instanceof Error ? err.message : String(err) }
-        logger.warn('[llm/agent] tool execution failed', { userId, tool: fnName, args, error: err instanceof Error ? err.message : String(err) })
-      }
-
-      messages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        content: JSON.stringify(result),
+      const response = await llmClient.chat.completions.create({
+        model: STRONG_MODEL,
+        messages,
+        tools: TOOLS,
+        tool_choice: 'auto',
+        temperature: 0.3,
       })
+
+      const message = response.choices[0]?.message
+      if (!message) throw new Error('LLM returned empty response')
+
+      messages.push(message)
+
+      // No tool calls — LLM produced the final answer
+      if (!message.tool_calls || message.tool_calls.length === 0) {
+        const content = message.content ?? 'Не смог найти информацию.'
+        logger.info('[FIX] agent loop completed', {
+          userId,
+          iterations: iteration,
+          tokens: response.usage?.total_tokens,
+        })
+        return content
+      }
+
+      logger.debug('[FIX] agent loop iteration', {
+        userId,
+        iteration,
+        tools: message.tool_calls.map((t) => t.function.name),
+      })
+
+      // Execute all tool calls in this iteration
+      for (const toolCall of message.tool_calls) {
+        const fnName = toolCall.function.name
+        let args: Record<string, unknown> = {}
+        try {
+          args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
+        } catch {
+          logger.warn('[llm/agent] failed to parse tool args', { fnName, raw: toolCall.function.arguments })
+        }
+
+        let result: unknown
+        try {
+          result = await executeTool(user, fnName, args)
+        } catch (err) {
+          result = { error: err instanceof Error ? err.message : String(err) }
+          logger.warn('[llm/agent] tool execution failed', { userId, tool: fnName, args, error: err instanceof Error ? err.message : String(err) })
+        }
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result),
+        })
+      }
     }
 
-    // Second call: LLM generates final answer with tool results
-    const finalResponse = await llmClient.chat.completions.create({
-      model: STRONG_MODEL,
-      messages,
-      temperature: 0.5,
-    })
-
-    const finalContent = finalResponse.choices[0]?.message?.content
-    if (!finalContent) throw new Error('LLM returned empty final response')
-
-    logger.debug('[llm/agent] done', {
-      userId,
-      tokens: finalResponse.usage?.total_tokens,
-    })
-
-    return finalContent
+    // Exceeded iteration limit — should not happen in normal usage
+    logger.warn('[FIX] agent loop exceeded max iterations', { userId, MAX_ITERATIONS })
+    return 'Не удалось завершить операцию: превышен лимит шагов. Попробуй ещё раз.'
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     logger.error('[llm/agent] error', { userId, error: message })

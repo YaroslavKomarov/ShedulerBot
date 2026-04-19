@@ -37,6 +37,22 @@ export async function deletePeriod(id: string): Promise<void> {
   logger.info('[db/periods] deletePeriod done', { id })
 }
 
+export async function deleteUserPeriods(userId: string): Promise<void> {
+  logger.debug('[db/periods] deleteUserPeriods', { userId })
+
+  const { error } = await supabase
+    .from('sch_periods')
+    .delete()
+    .eq('user_id', userId)
+
+  if (error) {
+    logger.error('[db/periods] deleteUserPeriods error', { userId, error: error.message })
+    throw new Error(`Failed to delete periods for user ${userId}: ${error.message}`)
+  }
+
+  logger.info('[db/periods] deleteUserPeriods done', { userId })
+}
+
 export async function createPeriods(periods: DbPeriodInsert[]): Promise<DbPeriod[]> {
   logger.debug('[db/periods] createPeriods', { userId: periods[0]?.user_id, count: periods.length })
 

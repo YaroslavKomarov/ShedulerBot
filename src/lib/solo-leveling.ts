@@ -5,6 +5,8 @@
  * Requires SOLO_LEVELING_URL env var.
  */
 import { logger } from './logger.js'
+import { getUserById, updateUser } from '../db/users.js'
+import { getUserPeriods } from '../db/periods.js'
 
 export interface SLPeriod {
   name: string
@@ -49,4 +51,46 @@ export async function sendPeriodsToSoloLeveling(
   const result = await response.json() as SLWebhookResult
   logger.info('[solo-leveling] periods sent successfully', { count: result.count })
   return result
+}
+
+/**
+ * Fetches current user periods from DB and sends them to SoloLeveling using the stored token.
+ * Silently skips if SOLO_LEVELING_URL is not set or user has no token.
+ * On 401: clears stored token and throws with code 401.
+ */
+export async function syncUserPeriodsToSoloLeveling(userId: string): Promise<void> {
+  if (!process.env.SOLO_LEVELING_URL) {
+    logger.debug('[FIX][solo-leveling] SOLO_LEVELING_URL not set, skipping sync', { userId })
+    return
+  }
+
+  const user = await getUserById(userId)
+  if (!user?.solo_leveling_token) {
+    logger.debug('[FIX][solo-leveling] no token stored, skipping sync', { userId })
+    return
+  }
+
+  const periods = await getUserPeriods(userId)
+  logger.info('[FIX][solo-leveling] syncing periods', { userId, count: periods.length })
+
+  try {
+    await sendPeriodsToSoloLeveling(
+      user.solo_leveling_token,
+      periods.map((p) => ({
+        name: p.name,
+        slug: p.slug,
+        start_time: p.start_time,
+        end_time: p.end_time,
+        days_of_week: p.days_of_week,
+      })),
+    )
+    logger.info('[FIX][solo-leveling] sync done', { userId })
+  } catch (err) {
+    const code = (err as { code?: number }).code
+    if (code === 401) {
+      logger.warn('[FIX][solo-leveling] token invalid (401), clearing', { userId })
+      await updateUser(userId, { solo_leveling_token: null })
+    }
+    throw err
+  }
 }

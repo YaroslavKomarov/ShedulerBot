@@ -11,6 +11,7 @@ export type Database = {
           google_access_token: string | null
           google_refresh_token: string | null
           google_token_expiry: string | null
+          solo_leveling_token: string | null
           created_at: string
         }
         Insert: {
@@ -22,6 +23,7 @@ export type Database = {
           google_access_token?: string | null
           google_refresh_token?: string | null
           google_token_expiry?: string | null
+          solo_leveling_token?: string | null
           created_at?: string
         }
         Update: {
@@ -33,6 +35,7 @@ export type Database = {
           google_access_token?: string | null
           google_refresh_token?: string | null
           google_token_expiry?: string | null
+          solo_leveling_token?: string | null
           created_at?: string
         }
         Relationships: []

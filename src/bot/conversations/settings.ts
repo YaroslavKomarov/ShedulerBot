@@ -3,9 +3,11 @@ import type { Conversation } from '@grammyjs/conversations'
 import type { BotContext } from '../index.js'
 import { waitForText } from './helpers.js'
 import { getUserByTelegramId, updateUser } from '../../db/users.js'
+import { getUserPeriods } from '../../db/periods.js'
 import { registerUserCrons, unregisterUserCrons } from '../../cron/manager.js'
 import { getAuthUrl } from '../../calendar/auth.js'
 import { logger } from '../../lib/logger.js'
+import { sendPeriodsToSoloLeveling } from '../../lib/solo-leveling.js'
 
 type SettingsConversation = Conversation<BotContext, BotContext>
 
@@ -19,12 +21,16 @@ function formatSettings(user: { timezone: string; morning_time: string; end_of_d
 }
 
 function buildSettingsKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
+  const kb = new InlineKeyboard()
     .text('🌍 Часовой пояс', 'set_timezone').row()
     .text('☀️ Утренний план', 'set_morning').row()
     .text('🌙 Конец дня', 'set_eod').row()
     .text('📅 Google Calendar', 'set_calendar').row()
-    .text('✅ Готово', 'set_done')
+  if (process.env.SOLO_LEVELING_URL) {
+    kb.text('🔗 SoloLeveling', 'set_solo_leveling').row()
+  }
+  kb.text('✅ Готово', 'set_done')
+  return kb
 }
 
 export async function settingsConversation(
@@ -77,6 +83,35 @@ export async function settingsConversation(
       changed = true
       logger.info('[conversation/settings] end_of_day_time updated', { userId: user.id, end_of_day_time })
       await ctx.reply(`✅ Конец дня: ${user.end_of_day_time}`, { reply_markup: buildSettingsKeyboard() })
+    } else if (action === 'set_solo_leveling') {
+      await ctx.reply('Введи токен SoloLeveling (найти в настройках приложения):')
+      const { text: slToken } = await waitForText(conversation)
+
+      const periods = await conversation.external(() => getUserPeriods(user!.id))
+      logger.info('[conversation/settings] sending periods to SoloLeveling', { userId: user!.id, count: periods.length })
+
+      await conversation.external(async () => {
+        await sendPeriodsToSoloLeveling(
+          slToken.trim(),
+          periods.map((p) => ({
+            name: p.name,
+            slug: p.slug,
+            start_time: p.start_time,
+            end_time: p.end_time,
+            days_of_week: p.days_of_week,
+          })),
+        )
+      }).then(
+        () => ctx.reply('✅ Периоды переданы в SoloLeveling! Настрой маппинг сфер в настройках SoloLeveling.', { reply_markup: buildSettingsKeyboard() }),
+        (err) => {
+          const code = (err as { code?: number }).code
+          logger.error('[conversation/settings] SoloLeveling sync failed', { userId: user!.id, code, error: err instanceof Error ? err.message : String(err) })
+          const msg = code === 401
+            ? '❌ Неверный токен. Проверь токен и попробуй снова.'
+            : '❌ Не удалось связаться с SoloLeveling. Попробуй позже.'
+          return ctx.reply(msg, { reply_markup: buildSettingsKeyboard() })
+        },
+      )
     } else if (action === 'set_calendar') {
       const hasGoogleConfig = !!(
         process.env.GOOGLE_CLIENT_ID &&

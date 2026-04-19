@@ -10,6 +10,7 @@ import { getAuthUrl } from '../../calendar/auth.js'
 import { createPeriods } from '../../db/periods.js'
 import { registerUserCrons } from '../../cron/manager.js'
 import { logger } from '../../lib/logger.js'
+import { sendPeriodsToSoloLeveling } from '../../lib/solo-leveling.js'
 
 function formatPeriodDays(days: number[]): string {
   const names: Record<number, string> = { 1: 'Пн', 2: 'Вт', 3: 'Ср', 4: 'Чт', 5: 'Пт', 6: 'Сб', 7: 'Вс' }
@@ -209,6 +210,59 @@ export async function onboardingConversation(
       }
     } else {
       await ctx.reply('Google Calendar временно недоступен. Настроить можно позже через /settings')
+    }
+  }
+
+  // Optional SoloLeveling connection
+  const hasSoloLevelingUrl = !!process.env.SOLO_LEVELING_URL
+  if (hasSoloLevelingUrl) {
+    const slKeyboard = new InlineKeyboard()
+      .text('🔗 Подключить', 'sl_connect')
+      .text('Пропустить', 'sl_skip')
+
+    await ctx.reply(
+      'Хочешь синхронизировать периоды с SoloLeveling? Тогда задачи из SoloLeveling будут попадать в нужные периоды расписания.\n\nВведи свой токен SoloLeveling (можно найти в настройках приложения).',
+      { reply_markup: slKeyboard },
+    )
+
+    const slCtx = await conversation.waitForCallbackQuery(/^sl_/)
+    await slCtx.answerCallbackQuery()
+    const slChoice = slCtx.callbackQuery.data
+    logger.info('[conversation/onboarding] solo-leveling choice', { userId, slChoice })
+
+    if (slChoice === 'sl_connect') {
+      await ctx.reply('Введи токен SoloLeveling:')
+      const { text: slToken } = await waitForText(conversation)
+
+      await conversation.external(async () => {
+        try {
+          await sendPeriodsToSoloLeveling(
+            slToken.trim(),
+            result!.periods.map((p) => ({
+              name: p.name,
+              slug: p.slug,
+              start_time: p.start_time,
+              end_time: p.end_time,
+              days_of_week: p.days_of_week,
+            })),
+          )
+          logger.info('[conversation/onboarding] solo-leveling periods synced', { userId })
+        } catch (err) {
+          const code = (err as { code?: number }).code
+          const msg = err instanceof Error ? err.message : String(err)
+          logger.error('[conversation/onboarding] solo-leveling sync failed', { userId, code, error: msg })
+          throw err
+        }
+      }).then(
+        () => ctx.reply('✅ Периоды переданы в SoloLeveling! Теперь настрой маппинг сфер в настройках SoloLeveling.'),
+        (err) => {
+          const code = (err as { code?: number }).code
+          if (code === 401) {
+            return ctx.reply('❌ Неверный токен. Проверь токен в настройках SoloLeveling и попробуй снова через /settings')
+          }
+          return ctx.reply('❌ Не удалось связаться с SoloLeveling. Попробуй позже через /settings')
+        },
+      )
     }
   }
 

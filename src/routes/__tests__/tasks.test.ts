@@ -37,6 +37,7 @@ const MOCK_USER = {
   google_access_token: null,
   google_refresh_token: null,
   google_token_expiry: null,
+          solo_leveling_token: null,
   created_at: '2026-01-01T00:00:00Z',
 }
 

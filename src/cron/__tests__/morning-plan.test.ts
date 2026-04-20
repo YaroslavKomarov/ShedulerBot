@@ -56,6 +56,7 @@ const mockUser: DbUser = {
   google_access_token: null,
   google_refresh_token: null,
   google_token_expiry: null,
+          solo_leveling_token: null,
   created_at: '2024-01-01T00:00:00.000Z',
 }
 

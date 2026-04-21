@@ -12,6 +12,11 @@ const NODE_ENV = process.env.NODE_ENV ?? 'development'
 const WEBHOOK_URL = process.env.WEBHOOK_URL
 
 async function main(): Promise<void> {
+  logger.info('[app] Integrations loaded', {
+    soloLeveling: !!process.env.SOLO_LEVELING_URL,
+    googleCalendar: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+  })
+
   const app = express()
   app.use(express.json())
 

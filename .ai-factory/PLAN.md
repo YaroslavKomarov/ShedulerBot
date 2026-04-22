@@ -1,139 +1,101 @@
-# Implementation Plan: Unified LLM Agent with Full Dialog Context
+# Implementation Plan: queue_slug — общая очередь задач для нескольких периодов
 
-Branch: master
-Created: 2026-04-07
+Created: 2026-04-22
 
 ## Settings
-- Testing: yes
-- Logging: verbose (follow existing `[module/function] message {data}` pattern)
+- Testing: no
+- Logging: standard
+- Docs: no
 
-## Context
+## Контекст
 
-Current architecture is fragmented: each message goes through `detectIntent` (fast LLM) → routing switch → dedicated handler with its own LLM call (`parseTaskMessage`, `parseProgressUpdate`, `handleAgentQuery`). Dialog context is lost between steps.
+Добавляем поле `queue_slug` в `sch_periods`. По умолчанию = `slug` периода. Если два периода должны делить одну очередь задач (например, "Работа утро" и "Работа вечер"), им выставляется одинаковый `queue_slug`. Задачи в `sch_tasks.period_slug` хранят `queue_slug` периода — это и есть ключ очереди.
 
-**Target:** single `STRONG_MODEL` agent with read+write tools, always receiving full conversation history. No intent classification. No separate parsers.
-
-## Commit Plan
-
-- **Commit 1** (after tasks 1–2): `feat: unified agent with write tools and simplified handlers`
-- **Commit 2** (after tasks 3–6): `chore: remove obsolete modules, add agent tests`
+**Принцип изменений:**
+- `sch_periods.slug` — остаётся уникальным идентификатором периода (не трогаем)
+- `sch_periods.queue_slug` — ключ очереди задач (новое поле, default = slug)
+- `sch_tasks.period_slug` — теперь хранит `queue_slug`, а не `slug` периода
+- Все запросы задач используют `period.queue_slug` вместо `period.slug`
 
 ---
 
 ## Tasks
 
-### Phase 1: Core Rewrite
+### Phase 1: БД и типы
 
-- [x] **Task 1: Extend agent with write tools**
+- [x] Task 1: DB-миграция — добавить `queue_slug` в `sch_periods`
+  - Создать файл `supabase/migrations/002_period_queue_slug.sql`
+  - `ALTER TABLE sch_periods ADD COLUMN queue_slug text;`
+  - `UPDATE sch_periods SET queue_slug = slug WHERE queue_slug IS NULL;`
+  - `ALTER TABLE sch_periods ALTER COLUMN queue_slug SET NOT NULL;`
+  - LOG: INFO "Migration 002: added queue_slug to sch_periods"
 
-  File: `src/llm/agent-query.ts`
+- [x] Task 2: Обновить TypeScript-типы для периодов
+  - `src/types/database.types.ts` — добавить `queue_slug: string` в Row/Insert/Update для `sch_periods`
+  - Проверить все интерфейсы Period в проекте
 
-  Add four new tools to the `TOOLS` array:
+### Phase 2: Слой данных
 
-  - `add_task` — parameters: `title` (required), `period_slug` (optional), `scheduled_date` (optional, YYYY-MM-DD), `is_urgent` (optional bool), `deadline_date` (optional), `estimated_minutes` (optional). Calls `createTask()` from `src/db/tasks.ts`. If `period_slug` or `scheduled_date` is missing — agent asks the user before calling the tool, does not call it with nulls silently.
-  - `update_task` — parameters: `title_query` (string, to find task via `findTasksByTitle`), `updates` (object: optional `title`, `period_slug`, `scheduled_date`, `is_urgent`, `deadline_date`, `estimated_minutes`, `status`). Calls `findTasksByTitle` then `updateTask`.
-  - `cancel_task` — parameters: `title_query`. Calls `findTasksByTitle` then `updateTask({ status: 'cancelled' })`.
-  - `mark_done` — parameters: `title_query`. Calls `findTasksByTitle` then `updateTask({ status: 'done' })`.
+- [x] Task 3: Обновить `src/db/periods.ts`
+  - Убедиться что `queue_slug` включён в SELECT-запросы
+  - В `createPeriods()` — передавать `queue_slug` (default = slug если не задан)
+  - В `updatePeriod()` — поддержать обновление `queue_slug`
+  - LOG: DEBUG `[periods.createPeriods] slug={slug}, queue_slug={queue_slug}`
 
-  Rename `handleAgentQuery` → `handleAgentMessage`. Update all callers.
+- [x] Task 4: Обновить онбординг — выставлять `queue_slug` при создании периодов
+  - `src/bot/conversations/onboarding.ts` — в маппинге добавить `queue_slug: p.slug`
 
-  Update system prompt: agent handles ALL user requests — questions, creating tasks, editing, cancelling, completing. Asks clarifying questions when required data is missing. Responds in Russian, concisely.
+<!-- 🔄 Commit checkpoint: tasks 1-4 — "feat: add queue_slug to sch_periods schema and types" -->
 
-  LOGGING:
-  - Log tool entry: `[llm/agent] tool:add_task {title, period_slug, scheduled_date}`
-  - Log tool result: `[llm/agent] task created {taskId, title}`
-  - Log tool errors: WARN with `{tool, args, error}`
+### Phase 3: Создание задач
 
-  Dependencies: none
+- [x] Task 5: Обновить `add_task` в `src/llm/agent-query.ts`
+  - После валидации `periodSlug` (slug периода) — найти период и взять его `queue_slug`
+  - Сохранять в `sch_tasks.period_slug` значение `period.queue_slug`, а не `period.slug`
+  - `const period = periods.find(p => p.slug === periodSlug)` → `taskPeriodSlug = period.queue_slug`
+  - LOG: DEBUG `[add_task] period.slug={periodSlug}, stored period_slug={taskPeriodSlug}`
 
-- [x] **Task 2: Simplify `handlers.ts`**
+### Phase 4: Выборка задач
 
-  File: `src/bot/handlers.ts`
+- [x] Task 6: Обновить `src/cron/period-notify.ts`
+  - В `sendPeriodPreview`, `sendPeriodStart`, `sendPeriodEnd` заменить `period.slug` → `period.queue_slug` при вызове `getTaskQueue`
+  - LOG: INFO `[period-notify] period={period.slug}, queue_slug={period.queue_slug}`
 
-  Remove all private handlers (`handleModifyTask`, `handleMarkDone`, `handleUpdateProgress`, `handleShowBacklog`) and the `detectIntent` routing switch.
+- [x] Task 7: Обновить `src/cron/morning-plan.ts` — группировка по queue_slug
+  - **Проблема**: при общем queue_slug два периода получат одинаковые задачи — дублирование.
+  - **Новая логика**:
+    1. Получить периоды дня (без изменений)
+    2. Сгруппировать по `queue_slug` (Map<queue_slug, Period[]>), сохранить порядок по времени
+    3. Для каждой группы — получить задачи один раз по `queue_slug`
+    4. Распределить последовательно: первый период заполняется до capacity, остаток — в следующий
+  - Backlog: также по `period.queue_slug`
+  - LOG: INFO `[morning-plan] queue_slug={qSlug}, periods_in_group={n}, total_tasks={m}`
 
-  New `handleText`:
-  ```typescript
-  export async function handleText(ctx: BotContext, text: string): Promise<void> {
-    if (!ctx.from) return
-    const user = await getUserByTelegramId(ctx.from.id)
-    if (!user) return
-    const history = await getChatHistory(user.id)
-    const reply = await handleAgentMessage(user, text, history)
-    await ctx.reply(reply)
-    await saveChatMessage(user.id, 'user', text)
-    await saveChatMessage(user.id, 'assistant', reply)
-  }
-  ```
+<!-- 🔄 Commit checkpoint: tasks 5-7 — "feat: use queue_slug for task assignment and retrieval" -->
 
-  Remove imports no longer needed: `detectIntent`, `parseTaskMessage`, `parseProgressUpdate`, `getUserPeriods`, `findTasksByTitle`, `updateTask`, `getBacklog`, `sendPlanForDate`.
+### Phase 5: Управление периодами
 
-  Keep `handleFreeText` as thin wrapper.
+- [x] Task 8: Обновить инструменты агента для работы с queue_slug
+  - `get_periods` — добавить `queue_slug` в вывод каждого периода
+  - `create_period` — добавить опциональный параметр `queue_slug` (default = slug)
+  - `update_period` — добавить опциональный параметр `queue_slug`
+  - Системный промпт — объяснить: "queue_slug — ключ общей очереди; чтобы объединить очереди двух периодов, выстави им одинаковый queue_slug через update_period"
+  - LOG: INFO `[update_period] period={slug}, new queue_slug={qSlug}`
 
-  LOGGING:
-  - Log `[bot/handlers] handleText {userId, textLength, historyLen}`
-  - Log `[bot/handlers] reply sent {userId, replyLength}`
-
-  Dependencies: Task 1
-
-<!-- 🔄 Commit checkpoint: tasks 1–2 -->
+<!-- 🔄 Commit checkpoint: task 8 — "feat: expose queue_slug management in agent tools" -->
 
 ---
 
-### Phase 2: Cleanup & Tests
+## Commit Plan
 
-- [x] **Task 3: Remove `addTaskConversation` from `index.ts`**
+- **Commit 1** (tasks 1-4): `feat: add queue_slug to sch_periods schema and types`
+- **Commit 2** (tasks 5-7): `feat: use queue_slug for task assignment and retrieval`
+- **Commit 3** (task 8): `feat: expose queue_slug management in agent tools`
 
-  File: `src/bot/index.ts`
+---
 
-  - Remove `import { addTaskConversation }` line
-  - Remove `bot.use(createConversation(addTaskConversation))` line
-  - No other changes needed
+## Важные нюансы
 
-  Dependencies: Task 2
-
-- [x] **Task 4: Write tests for unified agent**
-
-  File: `src/llm/__tests__/agent-message.test.ts`
-
-  Use vitest + mock `llmClient` (same pattern as existing tests in `src/llm/__tests__/`).
-
-  Test scenarios:
-  1. **Single-turn task creation** — user says "добавь задачу написать тесты на завтра", verify agent calls `add_task` tool with correct `title` and `scheduled_date`
-  2. **Multi-turn task creation** — history: `[{role: 'user', content: 'добавь задачу'}, {role: 'assistant', content: 'Как называется задача?'}]`, current: "написать тесты" — verify agent uses context and calls `add_task`
-  3. **Cancellation via follow-up** — history: `[{role: 'user', content: 'удали задачу'}, {role: 'assistant', content: 'Какую именно?'}]`, current: "тесты к авторизации" — verify agent calls `cancel_task` with `title_query: 'тесты к авторизации'`
-  4. **Query** — user asks "какие задачи на сегодня?", verify agent calls `get_tasks_by_date` and returns a formatted answer
-
-  Dependencies: Task 1
-
-- [x] **Task 5: Delete obsolete files and tests**
-
-  Delete:
-  - `src/llm/intent.ts`
-  - `src/llm/parse-task.ts`
-  - `src/llm/parse-progress.ts`
-  - `src/bot/conversations/add-task.ts`
-  - `src/llm/__tests__/intent.test.ts`
-  - `src/llm/__tests__/parse-task.test.ts`
-  - `src/llm/__tests__/parse-progress.test.ts`
-  - `src/bot/__tests__/handlers-step5.test.ts`
-
-  NOTE: `src/bot/conversations/helpers.ts` is used by `onboarding.ts` and `settings.ts` — do NOT delete.
-
-  Remove any remaining imports of deleted modules.
-
-  Dependencies: Tasks 2, 3
-
-- [x] **Task 6: Final verification**
-
-  Run:
-  ```bash
-  npx tsc --noEmit
-  npx vitest run
-  ```
-
-  Both must pass without errors. Fix any remaining type errors or broken imports.
-
-  Dependencies: Tasks 1–5
-
-<!-- 🔄 Commit checkpoint: tasks 3–6 -->
+- **Обратная совместимость**: существующие задачи имеют `period_slug = period.slug`. После миграции `queue_slug = slug` по умолчанию — ничего не ломается.
+- **Миграция данных задач не нужна**: пока `queue_slug = slug`, это одно и то же значение.
+- **SoloLeveling sync** — синхронизирует периоды по `slug`, не задачи. Изменений не требует.

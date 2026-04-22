@@ -65,6 +65,7 @@ const mockPeriod: DbPeriod = {
   user_id: 'user-1',
   name: 'Утро',
   slug: 'utro',
+  queue_slug: 'utro',
   start_time: '09:00',
   end_time: '11:00',
   days_of_week: [1, 2, 3, 4, 5],

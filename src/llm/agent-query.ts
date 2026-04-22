@@ -14,7 +14,7 @@ const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_periods',
-      description: 'Получить все периоды активности пользователя (имя, слаг, время начала/конца, дни недели)',
+      description: 'Получить все периоды активности пользователя (имя, слаг, queue_slug, время начала/конца, дни недели). queue_slug — ключ общей очереди задач; у периодов с одинаковым queue_slug одна очередь.',
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
@@ -162,7 +162,7 @@ const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'update_period',
-      description: 'Изменить существующий период активности (время начала/конца, дни недели, название). Вызывай ТОЛЬКО после явного подтверждения пользователем.',
+      description: 'Изменить существующий период активности (время начала/конца, дни недели, название, queue_slug). Вызывай ТОЛЬКО после явного подтверждения пользователем.',
       parameters: {
         type: 'object',
         properties: {
@@ -174,6 +174,10 @@ const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
             type: 'array',
             items: { type: 'number' },
             description: 'Дни недели: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс (опционально)',
+          },
+          queue_slug: {
+            type: 'string',
+            description: 'Ключ общей очереди задач (опционально). Установи одинаковый queue_slug у двух периодов, чтобы они делили одну очередь задач.',
           },
         },
         required: ['period_id'],
@@ -204,6 +208,10 @@ const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
         properties: {
           name: { type: 'string', description: 'Название периода' },
           slug: { type: 'string', description: 'Уникальный идентификатор (латиница, kebab-case, напр. "evening")' },
+          queue_slug: {
+            type: 'string',
+            description: 'Ключ общей очереди задач (опционально, по умолчанию = slug). Установи такой же queue_slug как у другого периода, чтобы делить с ним очередь задач.',
+          },
           start_time: { type: 'string', description: 'Время начала HH:MM' },
           end_time: { type: 'string', description: 'Время конца HH:MM' },
           days_of_week: {
@@ -284,12 +292,13 @@ async function executeTool(
       const deadlineDate = typeof args['deadline_date'] === 'string' ? args['deadline_date'] : null
       const estimatedMinutes = typeof args['estimated_minutes'] === 'number' ? args['estimated_minutes'] : null
 
-      logger.info('[llm/agent] tool:add_task', { title, period_slug: periodSlug, scheduled_date: scheduledDate })
+      const queueSlug = matchedPeriod.queue_slug
+      logger.info('[llm/agent] tool:add_task', { title, period_slug: periodSlug, queue_slug: queueSlug, scheduled_date: scheduledDate })
 
       const task = await createTask({
         user_id: userId,
         title,
-        period_slug: periodSlug,
+        period_slug: queueSlug,
         scheduled_date: scheduledDate,
         is_urgent: isUrgent,
         deadline_date: deadlineDate,
@@ -362,6 +371,7 @@ async function executeTool(
       if (typeof args['start_time'] === 'string') patch['start_time'] = args['start_time']
       if (typeof args['end_time'] === 'string') patch['end_time'] = args['end_time']
       if (Array.isArray(args['days_of_week'])) patch['days_of_week'] = args['days_of_week']
+      if (typeof args['queue_slug'] === 'string') patch['queue_slug'] = args['queue_slug']
 
       if (Object.keys(patch).length === 0) return { error: 'Не указаны поля для обновления' }
 
@@ -384,8 +394,8 @@ async function executeTool(
       const updated = await updatePeriod(periodId, patch)
       unregisterUserCrons(userId)
       await registerUserCrons(user)
-      logger.info('[llm/agent] period updated + crons re-registered', { periodId })
-      return { id: updated.id, name: updated.name, start_time: updated.start_time, end_time: updated.end_time, days_of_week: updated.days_of_week }
+      logger.info('[llm/agent] period updated + crons re-registered', { periodId, queue_slug: updated.queue_slug })
+      return { id: updated.id, name: updated.name, slug: updated.slug, queue_slug: updated.queue_slug, start_time: updated.start_time, end_time: updated.end_time, days_of_week: updated.days_of_week }
     }
 
     case 'delete_period': {
@@ -431,10 +441,13 @@ async function executeTool(
 
       const maxOrder = allPeriods.reduce((m, p) => Math.max(m, p.order_index ?? 0), 0)
 
+      const queueSlug = typeof args['queue_slug'] === 'string' && args['queue_slug'] ? args['queue_slug'] : slug
+
       const [created] = await createPeriods([{
         user_id: userId,
         name,
         slug,
+        queue_slug: queueSlug,
         start_time: startTime,
         end_time: endTime,
         days_of_week: daysOfWeek as number[],
@@ -443,8 +456,8 @@ async function executeTool(
 
       unregisterUserCrons(userId)
       await registerUserCrons(user)
-      logger.info('[llm/agent] period created + crons re-registered', { periodId: created.id, slug })
-      return { id: created.id, name: created.name, start_time: created.start_time, end_time: created.end_time, days_of_week: created.days_of_week }
+      logger.info('[llm/agent] period created + crons re-registered', { periodId: created.id, slug, queue_slug: queueSlug })
+      return { id: created.id, name: created.name, slug: created.slug, queue_slug: created.queue_slug, start_time: created.start_time, end_time: created.end_time, days_of_week: created.days_of_week }
     }
 
     default:
@@ -476,6 +489,12 @@ export async function handleAgentMessage(
 2. Покажи пользователю что именно изменится (было → станет) и спроси подтверждение.
 3. Только после явного "да" / "применить" / "подтверждаю" вызывай мутирующий инструмент.
 4. Если инструмент вернул ошибку (конфликт или не найдено) — сообщи об этом пользователю.
+
+Про queue_slug (общая очередь задач):
+- У каждого периода есть queue_slug — ключ общей очереди. По умолчанию queue_slug = slug.
+- Если у двух периодов одинаковый queue_slug, они делят одну очередь задач (задачи добавленные в один период видны в другом).
+- Чтобы объединить очереди двух периодов: вызови update_period для каждого и установи им одинаковый queue_slug (например, "work").
+- Чтобы разделить: верни каждому периоду свой уникальный queue_slug.
 
 Отвечай кратко и по делу. Используй русский язык.`
 

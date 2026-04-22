@@ -156,6 +156,7 @@ export async function onboardingConversation(
         user_id: user.id,
         name: p.name,
         slug: p.slug,
+        queue_slug: p.slug,
         start_time: p.start_time,
         end_time: p.end_time,
         days_of_week: p.days_of_week,

@@ -46,6 +46,7 @@ export type Database = {
           user_id: string
           name: string
           slug: string
+          queue_slug: string
           start_time: string
           end_time: string
           days_of_week: number[]
@@ -57,6 +58,7 @@ export type Database = {
           user_id: string
           name: string
           slug: string
+          queue_slug?: string
           start_time: string
           end_time: string
           days_of_week: number[]
@@ -68,6 +70,7 @@ export type Database = {
           user_id?: string
           name?: string
           slug?: string
+          queue_slug?: string
           start_time?: string
           end_time?: string
           days_of_week?: number[]

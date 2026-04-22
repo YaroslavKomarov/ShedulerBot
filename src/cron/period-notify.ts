@@ -24,7 +24,7 @@ export async function sendPeriodPreview(user: DbUser, period: DbPeriod): Promise
 
   try {
     const { date } = getTodayInTimezone(user.timezone)
-    const tasks = await getTaskQueue(user.id, period.slug, date)
+    const tasks = await getTaskQueue(user.id, period.queue_slug, date)
     const unassigned = await getUnassignedTodayTasks(user.id, date)
     const seenIds = new Set(tasks.map((t) => t.id))
     const allTasks = [...tasks, ...unassigned.filter((t) => !seenIds.has(t.id))]
@@ -53,7 +53,7 @@ export async function sendPeriodStart(user: DbUser, period: DbPeriod): Promise<v
 
   try {
     const { date } = getTodayInTimezone(user.timezone)
-    const tasks = await getTaskQueue(user.id, period.slug, date)
+    const tasks = await getTaskQueue(user.id, period.queue_slug, date)
 
     // Also include tasks scheduled for today with no period assignment
     const unassigned = await getUnassignedTodayTasks(user.id, date)
@@ -113,7 +113,7 @@ export async function sendPeriodEnd(user: DbUser, period: DbPeriod): Promise<voi
 
   try {
     const { date } = getTodayInTimezone(user.timezone)
-    const pendingTasks = await getTaskQueue(user.id, period.slug, date)
+    const pendingTasks = await getTaskQueue(user.id, period.queue_slug, date)
 
     const taskListText =
       pendingTasks.length > 0

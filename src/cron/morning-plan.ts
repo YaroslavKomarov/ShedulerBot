@@ -77,51 +77,71 @@ export async function runMorningPlan(user: DbUser): Promise<void> {
 
     const periodPlans: PeriodPlan[] = []
 
+    // Group periods by queue_slug — periods sharing a queue_slug share one task pool.
+    // Periods arrive sorted by start_time from the DB query, so group order is preserved.
+    const groups = new Map<string, DbPeriod[]>()
     for (const period of periods) {
-      const queueTasks = await getTaskQueue(user.id, period.slug, date)
-      const { slots, overflow: queueOverflow } = buildSlots(period, queueTasks)
+      const key = period.queue_slug
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key)!.push(period)
+    }
 
-      // Fill remaining time from backlog
-      const usedSlugSet = new Set(slots.map((s) => s.task.id))
-      const remainingMinutes =
-        periodDurationMinutes(period) -
-        slots.reduce((sum, s) => {
-          const dur = s.task.estimated_minutes ?? DEFAULT_TASK_MINUTES
-          return sum + dur
-        }, 0)
+    // Track placed task IDs globally to avoid duplicating tasks across periods.
+    const usedTaskIds = new Set<string>()
 
-      let backlogAdded = 0
-      if (remainingMinutes > 0) {
-        const backlog = await getBacklog(user.id, period.slug)
-        let remaining = remainingMinutes
+    for (const [queueSlug, groupPeriods] of groups) {
+      const queueTasks = await getTaskQueue(user.id, queueSlug, date)
+      const backlog = await getBacklog(user.id, queueSlug)
+
+      logger.info('[cron/morning-plan] processing queue group', {
+        userId: user.id,
+        queueSlug,
+        periodsInGroup: groupPeriods.length,
+        totalQueueTasks: queueTasks.length,
+      })
+
+      // Distribute queue tasks sequentially across periods in the group.
+      let remainingQueue = queueTasks.filter((t) => !usedTaskIds.has(t.id))
+
+      for (const period of groupPeriods) {
+        const { slots, overflow } = buildSlots(period, remainingQueue)
+
+        // Advance the pool past tasks placed in this period.
+        for (const slot of slots) usedTaskIds.add(slot.task.id)
+        remainingQueue = remainingQueue.slice(slots.length)
+
+        // Fill remaining capacity with backlog tasks not yet placed.
+        const usedMinutes = slots.reduce((sum, s) => sum + (s.task.estimated_minutes ?? DEFAULT_TASK_MINUTES), 0)
+        let remaining = periodDurationMinutes(period) - usedMinutes
+        let backlogAdded = 0
 
         for (const task of backlog) {
-          if (usedSlugSet.has(task.id)) continue
+          if (remaining <= 0) break
+          if (usedTaskIds.has(task.id)) continue
           const duration = task.estimated_minutes ?? DEFAULT_TASK_MINUTES
           if (duration > remaining) break
 
-          const startTime = addMinutesToTime(
-            period.start_time,
-            periodDurationMinutes(period) - remaining,
-          )
+          const startTime = addMinutesToTime(period.start_time, periodDurationMinutes(period) - remaining)
           const endTime = addMinutesToTime(period.start_time, periodDurationMinutes(period) - remaining + duration)
           slots.push({ task, startTime, endTime })
+          usedTaskIds.add(task.id)
           remaining -= duration
           backlogAdded++
         }
+
+        const allTasks = slots.map((s) => s.task)
+
+        logger.debug('[cron/morning-plan] period plan built', {
+          userId: user.id,
+          periodSlug: period.slug,
+          queueSlug,
+          taskCount: allTasks.length,
+          backlogAdded,
+          overflow,
+        })
+
+        periodPlans.push({ period, tasks: allTasks, slots })
       }
-
-      const allTasks = slots.map((s) => s.task)
-
-      logger.debug('[cron/morning-plan] period plan built', {
-        userId: user.id,
-        periodSlug: period.slug,
-        taskCount: allTasks.length,
-        backlogAdded,
-        overflow: queueOverflow,
-      })
-
-      periodPlans.push({ period, tasks: allTasks, slots })
     }
 
     // Include tasks scheduled for today but not assigned to any period.

@@ -260,7 +260,7 @@ export async function onboardingConversation(
               result!.periods.map((p) => ({
                 name: p.name,
                 slug: p.slug,
-                queue_slug: p.queue_slug ?? p.slug,
+                queue_slug: p.slug,
                 start_time: p.start_time,
                 end_time: p.end_time,
                 days_of_week: p.days_of_week,

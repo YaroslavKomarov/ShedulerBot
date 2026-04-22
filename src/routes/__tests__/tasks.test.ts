@@ -8,18 +8,21 @@ vi.mock('../../lib/logger.js', () => ({
 
 vi.mock('../../db/users.js', () => ({ getUserByTelegramId: vi.fn() }))
 vi.mock('../../db/tasks.js', () => ({ createTask: vi.fn(), findTaskByExternalId: vi.fn() }))
+vi.mock('../../db/periods.js', () => ({ getUserPeriods: vi.fn() }))
 vi.mock('../../bot/index.js', () => ({
   bot: { api: { sendMessage: vi.fn() } },
 }))
 
 import { getUserByTelegramId } from '../../db/users.js'
 import { createTask, findTaskByExternalId } from '../../db/tasks.js'
+import { getUserPeriods } from '../../db/periods.js'
 import { bot } from '../../bot/index.js'
 import { tasksRouter } from '../tasks.js'
 
 const mockGetUser = vi.mocked(getUserByTelegramId)
 const mockCreateTask = vi.mocked(createTask)
 const mockFindByExternalId = vi.mocked(findTaskByExternalId)
+const mockGetUserPeriods = vi.mocked(getUserPeriods)
 const mockSendMessage = vi.mocked(bot.api.sendMessage)
 
 const API_KEY = 'test-secret-key'
@@ -66,6 +69,7 @@ const VALID_BODY = {
 beforeEach(() => {
   vi.clearAllMocks()
   vi.stubEnv('API_SECRET_KEY', API_KEY)
+  mockGetUserPeriods.mockResolvedValue([])
 })
 
 describe('POST /api/tasks', () => {

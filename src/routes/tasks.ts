@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { bot } from '../bot/index.js'
 import { getUserByTelegramId } from '../db/users.js'
 import { createTask, findTaskByExternalId } from '../db/tasks.js'
+import { getUserPeriods } from '../db/periods.js'
 import { logger } from '../lib/logger.js'
 
 export const tasksRouter = Router()
@@ -65,11 +66,32 @@ tasksRouter.post('/tasks', async (req, res) => {
       return
     }
 
+    // Resolve period_slug → queue_slug so external tasks land in the correct queue.
+    // Callers send the period's slug; we store the queue_slug so getTaskQueue finds it.
+    let resolvedPeriodSlug = taskFields.period_slug ?? null
+    if (resolvedPeriodSlug) {
+      const periods = await getUserPeriods(user.id)
+      const period = periods.find((p) => p.slug === resolvedPeriodSlug)
+      if (period) {
+        resolvedPeriodSlug = period.queue_slug
+        logger.debug('[routes/tasks] resolved period_slug to queue_slug', {
+          input: taskFields.period_slug,
+          queue_slug: resolvedPeriodSlug,
+        })
+      } else {
+        logger.warn('[routes/tasks] period_slug not found, storing as-is', {
+          period_slug: resolvedPeriodSlug,
+          userId: user.id,
+        })
+      }
+    }
+
     const task = await createTask({
       user_id: user.id,
       source: 'external',
       external_id: external_id ?? null,
       ...taskFields,
+      period_slug: resolvedPeriodSlug,
     })
 
     logger.info('[routes/tasks] task created', { taskId: task.id, userId: user.id })

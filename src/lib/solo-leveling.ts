@@ -11,6 +11,7 @@ import { getUserPeriods } from '../db/periods.js'
 export interface SLPeriod {
   name: string
   slug: string
+  queue_slug: string
   start_time: string
   end_time: string
   days_of_week: number[]  // ISO: 1=Mon..7=Sun (SoloLeveling normalizes on ingest)
@@ -79,6 +80,7 @@ export async function syncUserPeriodsToSoloLeveling(userId: string): Promise<voi
       periods.map((p) => ({
         name: p.name,
         slug: p.slug,
+        queue_slug: p.queue_slug,
         start_time: p.start_time,
         end_time: p.end_time,
         days_of_week: p.days_of_week,

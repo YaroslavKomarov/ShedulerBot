@@ -166,7 +166,7 @@ const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          period_id: { type: 'string', description: 'ID периода (из get_periods)' },
+          period_slug: { type: 'string', description: 'Слаг периода (из get_periods, поле slug)' },
           name: { type: 'string', description: 'Новое название (опционально)' },
           start_time: { type: 'string', description: 'Новое время начала HH:MM (опционально)' },
           end_time: { type: 'string', description: 'Новое время конца HH:MM (опционально)' },
@@ -180,7 +180,7 @@ const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
             description: 'Ключ общей очереди задач (опционально). Установи одинаковый queue_slug у двух периодов, чтобы они делили одну очередь задач.',
           },
         },
-        required: ['period_id'],
+        required: ['period_slug'],
       },
     },
   },
@@ -192,9 +192,9 @@ const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          period_id: { type: 'string', description: 'ID периода (из get_periods)' },
+          period_slug: { type: 'string', description: 'Слаг периода (из get_periods, поле slug)' },
         },
-        required: ['period_id'],
+        required: ['period_slug'],
       },
     },
   },
@@ -363,8 +363,8 @@ async function executeTool(
     }
 
     case 'update_period': {
-      const periodId = args['period_id']
-      if (typeof periodId !== 'string' || !periodId) throw new Error('period_id must be a non-empty string')
+      const periodSlug = args['period_slug']
+      if (typeof periodSlug !== 'string' || !periodSlug) throw new Error('period_slug must be a non-empty string')
 
       const patch: Record<string, unknown> = {}
       if (typeof args['name'] === 'string') patch['name'] = args['name']
@@ -375,41 +375,46 @@ async function executeTool(
 
       if (Object.keys(patch).length === 0) return { error: 'Не указаны поля для обновления' }
 
-      // Overlap check if time/days are changing
       const allPeriods = await getUserPeriods(userId)
-      const target = allPeriods.find((p) => p.id === periodId)
-      if (!target) return { error: `Период не найден: ${periodId}` }
+      const target = allPeriods.find((p) => p.slug === periodSlug)
+      if (!target) {
+        const available = allPeriods.map((p) => p.slug).join(', ')
+        return { error: `Период со слагом "${periodSlug}" не найден. Доступные: ${available}` }
+      }
 
       const newStart = (patch['start_time'] as string | undefined) ?? target.start_time
       const newEnd = (patch['end_time'] as string | undefined) ?? target.end_time
       const newDays = (patch['days_of_week'] as number[] | undefined) ?? target.days_of_week
 
       const conflict = allPeriods.find(
-        (p) => p.id !== periodId && hasTimeOverlap(newStart, newEnd, newDays, p.start_time, p.end_time, p.days_of_week),
+        (p) => p.slug !== periodSlug && hasTimeOverlap(newStart, newEnd, newDays, p.start_time, p.end_time, p.days_of_week),
       )
       if (conflict) {
         return { error: `Конфликт с периодом "${conflict.name}" (${conflict.start_time}–${conflict.end_time})` }
       }
 
-      const updated = await updatePeriod(periodId, patch)
+      const updated = await updatePeriod(target.id, patch)
       unregisterUserCrons(userId)
       await registerUserCrons(user)
-      logger.info('[llm/agent] period updated + crons re-registered', { periodId, queue_slug: updated.queue_slug })
-      return { id: updated.id, name: updated.name, slug: updated.slug, queue_slug: updated.queue_slug, start_time: updated.start_time, end_time: updated.end_time, days_of_week: updated.days_of_week }
+      logger.info('[llm/agent] period updated + crons re-registered', { slug: periodSlug, queue_slug: updated.queue_slug })
+      return { name: updated.name, slug: updated.slug, queue_slug: updated.queue_slug, start_time: updated.start_time, end_time: updated.end_time, days_of_week: updated.days_of_week }
     }
 
     case 'delete_period': {
-      const periodId = args['period_id']
-      if (typeof periodId !== 'string' || !periodId) throw new Error('period_id must be a non-empty string')
+      const periodSlug = args['period_slug']
+      if (typeof periodSlug !== 'string' || !periodSlug) throw new Error('period_slug must be a non-empty string')
 
       const allPeriods = await getUserPeriods(userId)
-      const target = allPeriods.find((p) => p.id === periodId)
-      if (!target) return { error: `Период не найден: ${periodId}` }
+      const target = allPeriods.find((p) => p.slug === periodSlug)
+      if (!target) {
+        const available = allPeriods.map((p) => p.slug).join(', ')
+        return { error: `Период со слагом "${periodSlug}" не найден. Доступные: ${available}` }
+      }
 
-      await deletePeriod(periodId)
+      await deletePeriod(target.id)
       unregisterUserCrons(userId)
       await registerUserCrons(user)
-      logger.info('[llm/agent] period deleted + crons re-registered', { periodId })
+      logger.info('[llm/agent] period deleted + crons re-registered', { slug: periodSlug })
       return { deleted: true, name: target.name }
     }
 

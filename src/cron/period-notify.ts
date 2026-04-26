@@ -1,6 +1,6 @@
 import { bot } from '../bot/index.js'
 import { getTaskQueue, getUnassignedTodayTasks } from '../db/tasks.js'
-import { getTodayInTimezone } from './morning-plan.js'
+import { getTodayInTimezone, buildSlots, injectGuaranteedTasks } from './morning-plan.js'
 import { logger } from '../lib/logger.js'
 import type { DbUser, DbPeriod } from '../types/index.js'
 
@@ -11,7 +11,8 @@ function formatTaskList(tasks: Awaited<ReturnType<typeof getTaskQueue>>): string
     .map((t) => {
       const prefix = t.is_urgent ? '🔴' : '•'
       const durationStr = t.estimated_minutes ? ` ~${t.estimated_minutes} мин` : ''
-      return `${prefix} ${t.title}${durationStr}`
+      const overflowMark = t.is_overflow ? ' ⚠️ сверхурочно' : ''
+      return `${prefix} ${t.title}${durationStr}${overflowMark}`
     })
     .join('\n')
 }
@@ -70,9 +71,33 @@ export async function sendPeriodStart(user: DbUser, period: DbPeriod): Promise<v
       })
     }
 
+    const { slots, overflow } = buildSlots(period, allTasks)
+    const placedTasks = slots.map((s) => s.task)
+    const guaranteed = injectGuaranteedTasks(placedTasks, allTasks, date)
+
+    if (guaranteed.length > 0) {
+      logger.info('[cron/period-notify] sendPeriodStart: injecting guaranteed tasks', {
+        userId: user.id,
+        periodSlug: period.slug,
+        count: guaranteed.length,
+        tasks: guaranteed.map((t) => ({
+          id: t.id,
+          title: t.title,
+          reason: t.is_urgent
+            ? 'urgent'
+            : t.scheduled_date === date
+              ? 'scheduled_today'
+              : 'deadline_today',
+        })),
+      })
+    }
+
+    const displayTasks = [...placedTasks, ...guaranteed]
+
+    const overflowLine = overflow > 0 ? `\n_...и ещё ${overflow} задач не влезли в период_` : ''
     const text =
       `🚀 Начался период *${period.name}*!\n\n` +
-      `*План:*\n${formatTaskList(allTasks)}`
+      `*План:*\n${formatTaskList(displayTasks)}${overflowLine}`
 
     await bot.api.sendMessage(user.telegram_id, text, { parse_mode: 'Markdown' })
   } catch (err) {

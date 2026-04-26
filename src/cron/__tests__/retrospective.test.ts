@@ -7,6 +7,7 @@ vi.mock('../../lib/logger.js', () => ({
 vi.mock('../../db/tasks.js', () => ({
   getTasksByDate: vi.fn(),
   getBacklog: vi.fn(),
+  getOverdueDeadlineTasks: vi.fn(),
 }))
 
 vi.mock('../../llm/retrospective.js', () => ({
@@ -34,7 +35,7 @@ vi.mock('../morning-plan.js', () => ({
 }))
 
 import { runRetrospective, sendNextRescheduleTask } from '../retrospective.js'
-import { getTasksByDate, getBacklog } from '../../db/tasks.js'
+import { getTasksByDate, getBacklog, getOverdueDeadlineTasks } from '../../db/tasks.js'
 import { generateRetrospectiveMessage } from '../../llm/retrospective.js'
 import { enqueueReschedule, dequeueNextTask } from '../reschedule-queue.js'
 import { bot } from '../../bot/index.js'
@@ -43,6 +44,7 @@ import { logger } from '../../lib/logger.js'
 
 const mockGetTasksByDate = vi.mocked(getTasksByDate)
 const mockGetBacklog = vi.mocked(getBacklog)
+const mockGetOverdueDeadlineTasks = vi.mocked(getOverdueDeadlineTasks)
 const mockGenerateRetrospectiveMessage = vi.mocked(generateRetrospectiveMessage)
 const mockEnqueueReschedule = vi.mocked(enqueueReschedule)
 const mockDequeueNextTask = vi.mocked(dequeueNextTask)
@@ -67,6 +69,7 @@ const makeTask = (overrides: Partial<DbTask> = {}): DbTask => ({
   title: 'Тестовая задача',
   description: null,
   is_urgent: false,
+  is_overflow: false,
   deadline_date: null,
   estimated_minutes: null,
   status: 'pending',
@@ -84,6 +87,7 @@ describe('runRetrospective', () => {
     vi.clearAllMocks()
     mockSendMessage.mockResolvedValue({} as never)
     mockGenerateRetrospectiveMessage.mockResolvedValue('📊 Итоги дня 2024-06-10')
+    mockGetOverdueDeadlineTasks.mockResolvedValue([])
   })
 
   it('sends retro message and does not enqueue when no tasks and no backlog', async () => {

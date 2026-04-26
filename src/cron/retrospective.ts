@@ -1,6 +1,6 @@
 import { bot } from '../bot/index.js'
 import { InlineKeyboard } from 'grammy'
-import { getTasksByDate, getBacklog } from '../db/tasks.js'
+import { getTasksByDate, getBacklog, getOverdueDeadlineTasks } from '../db/tasks.js'
 import { generateRetrospectiveMessage } from '../llm/retrospective.js'
 import { enqueueReschedule, dequeueNextTask } from './reschedule-queue.js'
 import { getTodayInTimezone } from './morning-plan.js'
@@ -18,15 +18,21 @@ export async function sendNextRescheduleTask(telegramId: number, userId: string)
 
   logger.debug('[cron/retrospective] sendNextRescheduleTask: sending task', { userId, taskId: task.id })
 
+  const header = task.deadline_date && !task.scheduled_date
+    ? `⏰ Дедлайн просрочен: *${task.title}*`
+    : `📌 Задача не выполнена: *${task.title}*`
+
   const keyboard = new InlineKeyboard()
     .text('⏭ На завтра', `retro:tomorrow:${task.id}`).row()
+    .text('📅 Назначить дату', `retro:set_date:${task.id}`).row()
+    .text('🎯 Назначить дедлайн', `retro:set_deadline:${task.id}`).row()
     .text('📋 В бэклог', `retro:backlog:${task.id}`).row()
     .text('✅ Всё равно выполнено', `retro:done:${task.id}`).row()
     .text('❌ Отменить', `retro:cancel:${task.id}`).row()
 
   await bot.api.sendMessage(
     telegramId,
-    `📌 Задача не выполнена: *${task.title}*\nЧто сделать?`,
+    `${header}\nЧто сделать?`,
     { parse_mode: 'Markdown', reply_markup: keyboard },
   )
 }
@@ -41,6 +47,8 @@ export async function runRetrospective(user: DbUser): Promise<void> {
     const doneTasks = allTasks.filter((t) => t.status === 'done')
     const missedTasks = allTasks.filter((t) => t.status === 'pending')
 
+    const overdueDeadlineTasks = await getOverdueDeadlineTasks(user.id, date)
+
     const backlog = await getBacklog(user.id)
     const backlogNoDate = backlog.filter((t) => !t.deadline_date && !t.is_urgent)
 
@@ -48,20 +56,24 @@ export async function runRetrospective(user: DbUser): Promise<void> {
       userId: user.id,
       done: doneTasks.length,
       missed: missedTasks.length,
+      overdueDeadline: overdueDeadlineTasks.length,
       backlogNoDate: backlogNoDate.length,
     })
 
-    const message = await generateRetrospectiveMessage(user, date, doneTasks, missedTasks, backlogNoDate)
+    const tasksToReschedule = [...missedTasks, ...overdueDeadlineTasks]
+
+    const message = await generateRetrospectiveMessage(user, date, doneTasks, tasksToReschedule, backlogNoDate)
 
     await bot.api.sendMessage(user.telegram_id, message, { parse_mode: 'Markdown' })
     logger.info('[cron/retrospective] retro message sent', { userId: user.id })
 
-    if (missedTasks.length > 0) {
+    if (tasksToReschedule.length > 0) {
       logger.info('[cron/retrospective] starting reschedule flow', {
         userId: user.id,
         missedCount: missedTasks.length,
+        overdueDeadlineCount: overdueDeadlineTasks.length,
       })
-      enqueueReschedule(user.id, missedTasks)
+      enqueueReschedule(user.id, tasksToReschedule)
       await sendNextRescheduleTask(user.telegram_id, user.id)
     } else if (backlogNoDate.length > 0) {
       await bot.api.sendMessage(

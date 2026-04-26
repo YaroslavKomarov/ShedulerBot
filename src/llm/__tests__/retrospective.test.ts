@@ -35,6 +35,7 @@ const makeTask = (overrides: Partial<DbTask> = {}): DbTask => ({
   title: 'Тестовая задача',
   description: null,
   is_urgent: false,
+  is_overflow: false,
   deadline_date: null,
   estimated_minutes: null,
   status: 'done',

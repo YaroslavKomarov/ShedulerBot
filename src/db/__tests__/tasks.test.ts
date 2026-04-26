@@ -109,14 +109,10 @@ describe('updateTask', () => {
 describe('getTaskQueue', () => {
   it('queries with status, date filter, and priority sort', async () => {
     const mockData = [MOCK_TASK]
-    let orderCallCount = 0
-    vi.mocked(mockChain.order).mockImplementation(() => {
-      orderCallCount++
-      if (orderCallCount >= 3) {
-        return { data: mockData, error: null } as unknown as typeof mockChain
-      }
-      return mockChain
-    })
+    // Sorting is now done in TS after fetching; query ends with .or(), not .order()
+    vi.mocked(mockChain.or).mockReturnValueOnce(
+      { data: mockData, error: null } as unknown as typeof mockChain,
+    )
 
     await getTaskQueue('user-1', null, '2026-04-06')
 
@@ -126,14 +122,12 @@ describe('getTaskQueue', () => {
   })
 
   it('applies period_slug filter when provided', async () => {
-    let orderCallCount = 0
-    vi.mocked(mockChain.order).mockImplementation(() => {
-      orderCallCount++
-      if (orderCallCount >= 3) {
-        return { data: [], error: null } as unknown as typeof mockChain
-      }
-      return mockChain
-    })
+    // With period_slug: chain ends with .eq('period_slug', ...) after .or()
+    vi.mocked(mockChain.or).mockReturnValueOnce(mockChain)
+    vi.mocked(mockChain.eq)
+      .mockReturnValueOnce(mockChain) // eq(user_id)
+      .mockReturnValueOnce(mockChain) // eq(status)
+      .mockReturnValueOnce({ data: [], error: null } as unknown as typeof mockChain) // eq(period_slug)
 
     await getTaskQueue('user-1', 'morning', '2026-04-06')
 

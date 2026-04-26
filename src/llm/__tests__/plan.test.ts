@@ -49,6 +49,7 @@ const mockTask: DbTask = {
   title: 'Написать отчёт',
   description: null,
   is_urgent: false,
+  is_overflow: false,
   deadline_date: null,
   estimated_minutes: 30,
   status: 'pending',

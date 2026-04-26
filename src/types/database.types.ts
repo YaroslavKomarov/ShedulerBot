@@ -127,6 +127,7 @@ export type Database = {
           title: string
           description: string | null
           is_urgent: boolean
+          is_overflow: boolean
           deadline_date: string | null
           estimated_minutes: number | null
           status: 'pending' | 'done' | 'cancelled'
@@ -143,6 +144,7 @@ export type Database = {
           title: string
           description?: string | null
           is_urgent?: boolean
+          is_overflow?: boolean
           deadline_date?: string | null
           estimated_minutes?: number | null
           status?: 'pending' | 'done' | 'cancelled'
@@ -159,6 +161,7 @@ export type Database = {
           title?: string
           description?: string | null
           is_urgent?: boolean
+          is_overflow?: boolean
           deadline_date?: string | null
           estimated_minutes?: number | null
           status?: 'pending' | 'done' | 'cancelled'

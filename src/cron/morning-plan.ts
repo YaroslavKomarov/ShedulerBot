@@ -35,7 +35,7 @@ function periodDurationMinutes(period: DbPeriod): number {
  * Distributes tasks into time slots within a period.
  * Returns { slots, overflow } where overflow = tasks that didn't fit.
  */
-function buildSlots(period: DbPeriod, tasks: DbTask[]): { slots: TaskSlot[]; overflow: number } {
+export function buildSlots(period: DbPeriod, tasks: DbTask[]): { slots: TaskSlot[]; overflow: number } {
   const totalMinutes = periodDurationMinutes(period)
   const slots: TaskSlot[] = []
   let usedMinutes = 0
@@ -52,6 +52,23 @@ function buildSlots(period: DbPeriod, tasks: DbTask[]): { slots: TaskSlot[]; ove
 
   const overflow = tasks.length - slots.length
   return { slots, overflow }
+}
+
+/**
+ * Returns tasks from candidates that were not placed and belong to guaranteed categories:
+ * urgent, scheduled for today, or deadline today.
+ */
+export function injectGuaranteedTasks(
+  placed: DbTask[],
+  candidates: DbTask[],
+  date: string,
+): DbTask[] {
+  const placedIds = new Set(placed.map((t) => t.id))
+  return candidates.filter(
+    (t) =>
+      !placedIds.has(t.id) &&
+      (t.is_urgent || t.scheduled_date === date || t.deadline_date === date),
+  )
 }
 
 export async function runMorningPlan(user: DbUser): Promise<void> {
@@ -129,13 +146,35 @@ export async function runMorningPlan(user: DbUser): Promise<void> {
           backlogAdded++
         }
 
-        const allTasks = slots.map((s) => s.task)
+        const placedTasks = slots.map((s) => s.task)
+        const guaranteed = injectGuaranteedTasks(placedTasks, remainingQueue, date)
+
+        if (guaranteed.length > 0) {
+          logger.info('[cron/morning-plan] injecting guaranteed tasks outside slot budget', {
+            userId: user.id,
+            periodSlug: period.slug,
+            count: guaranteed.length,
+            tasks: guaranteed.map((t) => ({
+              id: t.id,
+              title: t.title,
+              reason: t.is_urgent
+                ? 'urgent'
+                : t.scheduled_date === date
+                  ? 'scheduled_today'
+                  : 'deadline_today',
+            })),
+          })
+          for (const t of guaranteed) usedTaskIds.add(t.id)
+        }
+
+        const allTasks = [...placedTasks, ...guaranteed]
 
         logger.debug('[cron/morning-plan] period plan built', {
           userId: user.id,
           periodSlug: period.slug,
           queueSlug,
           taskCount: allTasks.length,
+          guaranteedCount: guaranteed.length,
           backlogAdded,
           overflow,
         })

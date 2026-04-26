@@ -58,14 +58,28 @@ export async function getTaskQueue(
   }
 
   const { data, error } = await query
-    .order('is_urgent', { ascending: false })
-    .order('deadline_date', { ascending: true, nullsFirst: false })
-    .order('created_at', { ascending: true })
 
   if (error) {
     logger.error('[db/tasks] getTaskQueue error', { userId, periodSlug, date, error: error.message })
     throw new Error(`Failed to get task queue for user ${userId}: ${error.message}`)
   }
+
+  // PostgREST doesn't support expression-based ORDER BY (CASE WHEN), so sort in TS.
+  // Priority tiers: 0=urgent, 1=scheduled_date=today, 2=has deadline, 3=floating
+  const tier = (task: DbTask): number => {
+    if (task.is_urgent) return 0
+    if (task.scheduled_date === date) return 1
+    if (task.deadline_date !== null) return 2
+    return 3
+  }
+
+  data.sort((a, b) => {
+    const ta = tier(a)
+    const tb = tier(b)
+    if (ta !== tb) return ta - tb
+    if (ta === 2) return (a.deadline_date ?? '').localeCompare(b.deadline_date ?? '')
+    return a.created_at.localeCompare(b.created_at)
+  })
 
   logger.info('[db/tasks] getTaskQueue result', { userId, periodSlug, date, count: data.length, ids: data.map((t) => t.id) })
   return data
@@ -160,6 +174,84 @@ export async function getUnassignedTodayTasks(userId: string, date: string): Pro
   }
 
   logger.debug('[db/tasks] getUnassignedTodayTasks result', { userId, date, count: data.length })
+  return data
+}
+
+export async function getScheduledMinutes(
+  userId: string,
+  queueSlug: string,
+  date: string,
+): Promise<number> {
+  logger.debug('[db/tasks] getScheduledMinutes', { userId, queueSlug, date })
+
+  const { data, error } = await supabase
+    .from('sch_tasks')
+    .select('estimated_minutes')
+    .eq('user_id', userId)
+    .eq('period_slug', queueSlug)
+    .eq('scheduled_date', date)
+    .eq('status', 'pending')
+
+  if (error) {
+    logger.error('[db/tasks] getScheduledMinutes error', { userId, queueSlug, date, error: error.message })
+    throw new Error(`Failed to get scheduled minutes: ${error.message}`)
+  }
+
+  const DEFAULT_TASK_MINUTES = 30
+  const totalMinutes = data.reduce((sum, t) => sum + (t.estimated_minutes ?? DEFAULT_TASK_MINUTES), 0)
+  logger.debug('[db/tasks] getScheduledMinutes result', { userId, queueSlug, date, totalMinutes })
+  return totalMinutes
+}
+
+export async function getOverdueDeadlineTasks(userId: string, date: string): Promise<DbTask[]> {
+  logger.debug('[db/tasks] getOverdueDeadlineTasks', { userId, date })
+
+  const { data, error } = await supabase
+    .from('sch_tasks')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('status', 'pending')
+    .is('scheduled_date', null)
+    .lte('deadline_date', date)
+    .order('deadline_date', { ascending: true })
+    .order('created_at', { ascending: true })
+
+  if (error) {
+    logger.error('[db/tasks] getOverdueDeadlineTasks error', { userId, date, error: error.message })
+    throw new Error(`Failed to get overdue deadline tasks for user ${userId}: ${error.message}`)
+  }
+
+  logger.info('[db/tasks] getOverdueDeadlineTasks result', { userId, date, count: data.length })
+  return data
+}
+
+export async function getUrgentTask(
+  userId: string,
+  queueSlug: string,
+  excludeTaskId?: string,
+): Promise<DbTask | null> {
+  logger.debug('[db/tasks] getUrgentTask', { userId, queueSlug, excludeTaskId })
+
+  let query = supabase
+    .from('sch_tasks')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('period_slug', queueSlug)
+    .eq('is_urgent', true)
+    .eq('status', 'pending')
+
+  if (excludeTaskId) {
+    query = query.neq('id', excludeTaskId)
+  }
+
+  const { data, error } = await query.maybeSingle()
+
+  if (error) {
+    logger.error('[db/tasks] getUrgentTask error', { userId, queueSlug, error: error.message })
+    throw new Error(`Failed to get urgent task: ${error.message}`)
+  }
+
+  logger.debug('[db/tasks] getUrgentTask result', { userId, queueSlug, found: data !== null })
   return data
 }
 

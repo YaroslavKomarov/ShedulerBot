@@ -8,16 +8,22 @@ import { logger } from '../lib/logger.js'
 
 export const tasksRouter = Router()
 
-const CreateTaskSchema = z.object({
-  telegram_id: z.number(),
-  title: z.string().min(1),
-  description: z.string().optional(),
-  period_slug: z.string().optional().nullable(),
-  deadline_date: z.string().optional().nullable(),
-  estimated_minutes: z.number().int().positive().optional().nullable(),
-  is_urgent: z.boolean().default(false),
-  external_id: z.string().optional().nullable(),
-})
+const CreateTaskSchema = z
+  .object({
+    telegram_id: z.number(),
+    title: z.string().min(1),
+    description: z.string().optional(),
+    period_slug: z.string().optional().nullable(),
+    deadline_date: z.string().optional().nullable(),
+    scheduled_date: z.string().optional().nullable(),
+    estimated_minutes: z.number().int().positive().optional().nullable(),
+    is_urgent: z.boolean().default(false),
+    external_id: z.string().optional().nullable(),
+  })
+  .refine((data) => !(data.scheduled_date && data.deadline_date), {
+    message: 'scheduled_date и deadline_date взаимоисключающие',
+    path: ['scheduled_date'],
+  })
 
 tasksRouter.post('/tasks', async (req, res) => {
   const apiKey = req.headers['x-api-key']
@@ -37,7 +43,14 @@ tasksRouter.post('/tasks', async (req, res) => {
 
   const parsed = CreateTaskSchema.safeParse(req.body)
   if (!parsed.success) {
-    logger.debug('[routes/tasks] validation failed', { errors: parsed.error.format() })
+    if (req.body?.scheduled_date && req.body?.deadline_date) {
+      logger.warn('[routes/tasks] Rejected: both scheduled_date and deadline_date provided', {
+        telegram_id: req.body?.telegram_id,
+        external_id: req.body?.external_id,
+      })
+    } else {
+      logger.debug('[routes/tasks] validation failed', { errors: parsed.error.format() })
+    }
     res.status(400).json({ error: 'Bad Request', details: parsed.error.format() })
     return
   }

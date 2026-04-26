@@ -56,6 +56,7 @@ vi.mock('../../db/tasks.js', () => ({
   createTask: vi.fn(),
   findTasksByTitle: vi.fn(),
   updateTask: vi.fn(),
+  getScheduledMinutes: vi.fn().mockResolvedValue(0),
 }))
 
 import { handleAgentMessage } from '../agent-query.js'
@@ -126,6 +127,7 @@ describe('handleAgentMessage', () => {
       title: 'написать тесты',
       description: null,
       is_urgent: false,
+      is_overflow: false,
       deadline_date: null,
       estimated_minutes: null,
       status: 'pending',
@@ -161,6 +163,7 @@ describe('handleAgentMessage', () => {
       title: 'написать тесты',
       description: null,
       is_urgent: false,
+      is_overflow: false,
       deadline_date: null,
       estimated_minutes: null,
       status: 'pending',
@@ -201,6 +204,7 @@ describe('handleAgentMessage', () => {
         title: 'тесты к авторизации',
         description: null,
         is_urgent: false,
+        is_overflow: false,
         deadline_date: null,
         estimated_minutes: null,
         status: 'pending',
@@ -218,6 +222,7 @@ describe('handleAgentMessage', () => {
       title: 'тесты к авторизации',
       description: null,
       is_urgent: false,
+      is_overflow: false,
       deadline_date: null,
       estimated_minutes: null,
       status: 'cancelled',
@@ -269,6 +274,7 @@ describe('handleAgentMessage', () => {
       title: 'Тренировка на грудь',
       description: null,
       is_urgent: false,
+      is_overflow: false,
       deadline_date: null,
       estimated_minutes: null,
       status: 'pending',
@@ -328,6 +334,7 @@ describe('handleAgentMessage', () => {
       title: 'Тренировка',
       description: null,
       is_urgent: false,
+      is_overflow: false,
       deadline_date: null,
       estimated_minutes: null,
       status: 'pending',
@@ -364,6 +371,140 @@ describe('handleAgentMessage', () => {
     expect(reply).toBeTruthy()
   })
 
+  describe('add_task / update_task: scheduled_date and deadline_date mutual exclusivity', () => {
+    const TASK_STUB = {
+      id: 'task-x',
+      user_id: 'user-1',
+      title: 'Тестовая задача',
+      description: null,
+      is_urgent: false,
+      is_overflow: false,
+      deadline_date: null,
+      estimated_minutes: null,
+      status: 'pending' as const,
+      scheduled_date: null,
+      period_slug: 'work',
+      source: 'user' as const,
+      external_id: null,
+      progress_note: null,
+      created_at: '2026-04-25T00:00:00.000Z',
+    }
+
+    it('add_task: both scheduled_date and deadline_date → returns error, createTask not called', async () => {
+      mockCreate
+        .mockResolvedValueOnce(makeLLMToolCallResponse('add_task', {
+          title: 'Тестовая задача',
+          period_slug: 'work',
+          scheduled_date: '2026-05-01',
+          deadline_date: '2026-05-10',
+        }) as never)
+        .mockResolvedValueOnce(makeLLMResponse('Уточните, пожалуйста.') as never)
+
+      await handleAgentMessage(mockUser, 'добавь задачу', [])
+
+      expect(mockCreateTask).not.toHaveBeenCalled()
+      // LLM received tool result with error
+      const toolResultMsg = mockCreate.mock.calls[1][0].messages.find(
+        (m: { role: string }) => m.role === 'tool',
+      )
+      expect(JSON.parse(toolResultMsg!.content as string)).toHaveProperty('error')
+      expect(JSON.parse(toolResultMsg!.content as string).error).toContain('взаимоисключающие')
+    })
+
+    it('add_task: only scheduled_date → createTask called without deadline_date', async () => {
+      mockCreateTask.mockResolvedValueOnce({ ...TASK_STUB, scheduled_date: '2026-05-01' })
+      mockCreate
+        .mockResolvedValueOnce(makeLLMToolCallResponse('add_task', {
+          title: 'Тестовая задача',
+          period_slug: 'work',
+          scheduled_date: '2026-05-01',
+        }) as never)
+        .mockResolvedValueOnce(makeLLMResponse('Задача создана.') as never)
+
+      await handleAgentMessage(mockUser, 'добавь задачу', [])
+
+      expect(mockCreateTask).toHaveBeenCalledOnce()
+      expect(mockCreateTask).toHaveBeenCalledWith(
+        expect.objectContaining({ scheduled_date: '2026-05-01', deadline_date: null }),
+      )
+    })
+
+    it('add_task: only deadline_date → createTask called without scheduled_date', async () => {
+      mockCreateTask.mockResolvedValueOnce({ ...TASK_STUB, deadline_date: '2026-05-10' })
+      mockCreate
+        .mockResolvedValueOnce(makeLLMToolCallResponse('add_task', {
+          title: 'Тестовая задача',
+          period_slug: 'work',
+          deadline_date: '2026-05-10',
+        }) as never)
+        .mockResolvedValueOnce(makeLLMResponse('Задача создана.') as never)
+
+      await handleAgentMessage(mockUser, 'добавь задачу', [])
+
+      expect(mockCreateTask).toHaveBeenCalledOnce()
+      expect(mockCreateTask).toHaveBeenCalledWith(
+        expect.objectContaining({ deadline_date: '2026-05-10', scheduled_date: null }),
+      )
+    })
+
+    it('update_task: patch with scheduled_date → updateTask called with deadline_date: null', async () => {
+      mockFindTasksByTitle.mockResolvedValueOnce([{ ...TASK_STUB, deadline_date: '2026-04-30' }])
+      mockUpdateTask.mockResolvedValueOnce({ ...TASK_STUB, scheduled_date: '2026-05-01', deadline_date: null })
+      mockCreate
+        .mockResolvedValueOnce(makeLLMToolCallResponse('update_task', {
+          title_query: 'Тестовая задача',
+          updates: { scheduled_date: '2026-05-01' },
+        }) as never)
+        .mockResolvedValueOnce(makeLLMResponse('Задача обновлена.') as never)
+
+      await handleAgentMessage(mockUser, 'перенеси задачу', [])
+
+      expect(mockUpdateTask).toHaveBeenCalledOnce()
+      expect(mockUpdateTask).toHaveBeenCalledWith(
+        TASK_STUB.id,
+        expect.objectContaining({ scheduled_date: '2026-05-01', deadline_date: null }),
+      )
+    })
+
+    it('update_task: patch with deadline_date → updateTask called with scheduled_date: null', async () => {
+      mockFindTasksByTitle.mockResolvedValueOnce([{ ...TASK_STUB, scheduled_date: '2026-04-28' }])
+      mockUpdateTask.mockResolvedValueOnce({ ...TASK_STUB, deadline_date: '2026-05-10', scheduled_date: null })
+      mockCreate
+        .mockResolvedValueOnce(makeLLMToolCallResponse('update_task', {
+          title_query: 'Тестовая задача',
+          updates: { deadline_date: '2026-05-10' },
+        }) as never)
+        .mockResolvedValueOnce(makeLLMResponse('Дедлайн выставлен.') as never)
+
+      await handleAgentMessage(mockUser, 'выставь дедлайн', [])
+
+      expect(mockUpdateTask).toHaveBeenCalledOnce()
+      expect(mockUpdateTask).toHaveBeenCalledWith(
+        TASK_STUB.id,
+        expect.objectContaining({ deadline_date: '2026-05-10', scheduled_date: null }),
+      )
+    })
+
+    it('update_task: both dates in patch simultaneously → returns error, updateTask not called', async () => {
+      mockFindTasksByTitle.mockResolvedValueOnce([TASK_STUB])
+      mockCreate
+        .mockResolvedValueOnce(makeLLMToolCallResponse('update_task', {
+          title_query: 'Тестовая задача',
+          updates: { scheduled_date: '2026-05-01', deadline_date: '2026-05-10' },
+        }) as never)
+        .mockResolvedValueOnce(makeLLMResponse('Уточните.') as never)
+
+      await handleAgentMessage(mockUser, 'обнови задачу', [])
+
+      expect(mockUpdateTask).not.toHaveBeenCalled()
+      const toolResultMsg = mockCreate.mock.calls[1][0].messages.find(
+        (m: { role: string }) => m.role === 'tool',
+      )
+      expect(JSON.parse(toolResultMsg!.content as string)).toHaveProperty('error')
+      expect(JSON.parse(toolResultMsg!.content as string).error).toContain('взаимоисключающие')
+    })
+  })
+
   it('scenario 4: query calls get_tasks_by_date and returns formatted answer', async () => {
     const today = new Date().toISOString().split('T')[0]
     mockGetTasksByDate.mockResolvedValueOnce([
@@ -373,6 +514,7 @@ describe('handleAgentMessage', () => {
         title: 'Позвонить клиенту',
         description: null,
         is_urgent: false,
+        is_overflow: false,
         deadline_date: null,
         estimated_minutes: 15,
         status: 'pending',

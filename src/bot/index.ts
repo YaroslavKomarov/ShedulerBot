@@ -6,6 +6,7 @@ import { getUserByTelegramId } from '../db/users.js'
 import { clearChatHistory } from '../db/chat-history.js'
 import { onboardingConversation } from './conversations/onboarding.js'
 import { settingsConversation } from './conversations/settings.js'
+import { retroDateInputConversation } from './conversations/retro-date-input.js'
 import { handleFreeText, handleText } from './handlers.js'
 import { transcribeVoice } from './middleware/voice.js'
 import { sendPlanForDate, sendQueueForToday } from './plan-helper.js'
@@ -36,6 +37,7 @@ bot.use(conversations())
 // Register conversations
 bot.use(createConversation(onboardingConversation))
 bot.use(createConversation(settingsConversation))
+bot.use(createConversation(retroDateInputConversation))
 
 // /start command — route new users to onboarding, existing users to plan stub
 bot.command('start', async (ctx) => {
@@ -59,6 +61,52 @@ bot.command('start', async (ctx) => {
 bot.command('settings', async (ctx) => {
   logger.info('[bot] /settings command', { userId: ctx.from?.id })
   await ctx.conversation.enter('settingsConversation')
+})
+
+// /guide — show system logic cheat sheet
+bot.command('guide', async (ctx) => {
+  logger.info('[bot] /guide command', { userId: ctx.from?.id })
+  await ctx.reply(
+    `📖 *Как работает планировщик*
+
+*Периоды активности*
+Ты настраиваешь периоды в онбординге: например, «Утро» \\(09:00–12:00\\) или «Работа» \\(14:00–18:00\\)\\. Каждый период привязан к определённым дням недели\\.
+
+У каждого периода есть *очередь задач*\\. Два периода могут делить одну очередь — для этого им назначается одинаковый queue\\_slug\\. Например, «Работа утром» и «Работа вечером» могут тянуть задачи из одного пула\\.
+
+*Типы задач*
+🔴 *Срочная* — без даты и дедлайна, всегда первая в очереди\\. В каждой очереди может быть только одна\\.
+📅 *Плановая* — привязана к конкретной дате\\. Появляется только в этот день\\. Дедлайн не назначается\\.
+⏳ *С дедлайном* — нет конкретной даты, но есть крайний срок\\. Появляется каждый день до истечения дедлайна\\.
+🔄 *Плавающая* — нет ни даты, ни дедлайна\\. Появляется каждый день, пока не выполнена\\.
+
+*Сортировка в очереди*
+1\\. 🔴 Срочная — абсолютный верх
+2\\. 📅 Плановые на сегодня — сразу под срочной, между собой по дате создания
+3\\. ⏳ С дедлайном — чем ближе срок, тем выше
+4\\. 🔄 Плавающие — по дате создания
+
+*Вместимость периода*
+При добавлении плановой задачи бот проверяет, влезает ли она по времени\\. Если нет — предупредит и спросит подтверждение\\. Сверхурочные задачи помечаются ⚠️\\.
+
+*Гарантированное отображение*
+Срочная задача, плановые на сегодня и задачи с дедлайном сегодня всегда присутствуют в уведомлениях — даже если период уже заполнен\\.
+
+*Уведомления*
+— За 10 минут до старта — превью: первые 5 задач
+— В момент старта — задачи по вместимости \\+ гарантированные \\+ счётчик overflow
+— За 10 минут до конца — напоминание отметить выполненное
+— В момент конца — что осталось невыполненным
+— Утренний план — сводка по всем периодам
+— Ретроспектива — в конце дня
+
+*Ретроспектива*
+Попадают задачи, запланированные на сегодня и не выполненные, а также задачи с истёкшим дедлайном\\. По каждой можно: перенести на завтра, назначить новую дату или дедлайн, отправить в бэклог, отметить выполненной или отменить\\.
+
+*Бэклог*
+Плавающие задачи без дедлайна\\. Чтобы посмотреть — напиши боту, например: «покажи бэклог периода Работа»\\.`,
+    { parse_mode: 'MarkdownV2' },
+  )
 })
 
 // /plan — show today's plan
@@ -127,8 +175,8 @@ bot.callbackQuery(/^done:(.+)$/, async (ctx) => {
 })
 
 // Callback query: retro:<action>:<taskId>
-bot.callbackQuery(/^retro:(tomorrow|backlog|done|cancel):(.+)$/, async (ctx) => {
-  const action = ctx.match[1] as 'tomorrow' | 'backlog' | 'done' | 'cancel'
+bot.callbackQuery(/^retro:(tomorrow|backlog|done|cancel|set_date|set_deadline):(.+)$/, async (ctx) => {
+  const action = ctx.match[1] as 'tomorrow' | 'backlog' | 'done' | 'cancel' | 'set_date' | 'set_deadline'
   const taskId = ctx.match[2]
   const telegramId = ctx.from.id
 
@@ -151,7 +199,7 @@ bot.callbackQuery(/^retro:(tomorrow|backlog|done|cancel):(.+)$/, async (ctx) => 
       await updateTask(taskId, { scheduled_date: tomorrow })
       await ctx.answerCallbackQuery({ text: '⏭ Перенесено на завтра' })
     } else if (action === 'backlog') {
-      await updateTask(taskId, { scheduled_date: null })
+      await updateTask(taskId, { scheduled_date: null, deadline_date: null })
       await ctx.answerCallbackQuery({ text: '📋 Перемещено в бэклог' })
     } else if (action === 'done') {
       await updateTask(taskId, { status: 'done' })
@@ -159,6 +207,19 @@ bot.callbackQuery(/^retro:(tomorrow|backlog|done|cancel):(.+)$/, async (ctx) => 
     } else if (action === 'cancel') {
       await updateTask(taskId, { status: 'cancelled' })
       await ctx.answerCallbackQuery({ text: '❌ Задача отменена' })
+    } else if (action === 'set_date' || action === 'set_deadline') {
+      const { date: today } = getTodayInTimezone(user.timezone)
+      logger.info('[bot] retro set_date/set_deadline: entering conversation', { taskId, userId: user.id })
+      await ctx.answerCallbackQuery()
+      await ctx.editMessageReplyMarkup()
+      await ctx.conversation.enter('retroDateInputConversation', {
+        action,
+        taskId,
+        userId: user.id,
+        telegramId: user.telegram_id,
+        today,
+      })
+      return
     }
 
     await ctx.editMessageReplyMarkup()

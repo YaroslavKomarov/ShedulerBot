@@ -50,6 +50,7 @@ const MOCK_TASK = {
   title: 'Написать отчёт',
   description: null,
   is_urgent: false,
+  is_overflow: false,
   deadline_date: null,
   estimated_minutes: null,
   period_slug: null,
@@ -177,5 +178,55 @@ describe('POST /api/tasks', () => {
 
     expect(res.status).toBe(201)
     expect(res.body).toEqual({ id: 'task-uuid-1', created: true })
+  })
+
+  describe('scheduled_date / deadline_date mutual exclusivity', () => {
+    it('returns 400 when both scheduled_date and deadline_date are provided', async () => {
+      const res = await request(app)
+        .post('/api/tasks')
+        .set('X-Api-Key', API_KEY)
+        .send({ ...VALID_BODY, scheduled_date: '2026-05-01', deadline_date: '2026-05-10' })
+
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('Bad Request')
+      expect(JSON.stringify(res.body.details)).toContain('взаимоисключающие')
+      expect(mockCreateTask).not.toHaveBeenCalled()
+    })
+
+    it('returns 201 when only scheduled_date is provided', async () => {
+      mockGetUser.mockResolvedValue(MOCK_USER)
+      mockCreateTask.mockResolvedValue({ ...MOCK_TASK, scheduled_date: '2026-05-01' })
+      mockSendMessage.mockResolvedValue({} as any)
+
+      const res = await request(app)
+        .post('/api/tasks')
+        .set('X-Api-Key', API_KEY)
+        .send({ ...VALID_BODY, scheduled_date: '2026-05-01' })
+
+      expect(res.status).toBe(201)
+      expect(mockCreateTask).toHaveBeenCalledWith(
+        expect.objectContaining({ scheduled_date: '2026-05-01' }),
+      )
+      // deadline_date must not appear in the call (not sent in body → Zod excludes it)
+      expect(mockCreateTask.mock.calls[0][0]).not.toHaveProperty('deadline_date', expect.any(String))
+    })
+
+    it('returns 201 when only deadline_date is provided', async () => {
+      mockGetUser.mockResolvedValue(MOCK_USER)
+      mockCreateTask.mockResolvedValue({ ...MOCK_TASK, deadline_date: '2026-05-10' })
+      mockSendMessage.mockResolvedValue({} as any)
+
+      const res = await request(app)
+        .post('/api/tasks')
+        .set('X-Api-Key', API_KEY)
+        .send({ ...VALID_BODY, deadline_date: '2026-05-10' })
+
+      expect(res.status).toBe(201)
+      expect(mockCreateTask).toHaveBeenCalledWith(
+        expect.objectContaining({ deadline_date: '2026-05-10' }),
+      )
+      // scheduled_date must not appear in the call
+      expect(mockCreateTask.mock.calls[0][0]).not.toHaveProperty('scheduled_date', expect.any(String))
+    })
   })
 })

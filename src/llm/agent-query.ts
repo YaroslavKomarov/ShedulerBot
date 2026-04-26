@@ -1,7 +1,7 @@
 import type OpenAI from 'openai'
 import { llmClient, STRONG_MODEL, LLMInsufficientCreditsError } from './client.js'
 import { getUserPeriods, getPeriodsForDay, updatePeriod, deletePeriod, createPeriods } from '../db/periods.js'
-import { getTasksByDate, getBacklog, getTaskQueue, createTask, findTasksByTitle, updateTask } from '../db/tasks.js'
+import { getTasksByDate, getBacklog, getTaskQueue, createTask, findTasksByTitle, updateTask, getScheduledMinutes, getUrgentTask } from '../db/tasks.js'
 import { registerUserCrons, unregisterUserCrons } from '../cron/manager.js'
 import { logger } from '../lib/logger.js'
 import { getTodayInTimezone } from '../lib/date.js'
@@ -94,10 +94,11 @@ const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
         properties: {
           title: { type: 'string', description: 'Название задачи' },
           period_slug: { type: 'string', description: 'Слаг периода активности (обязательно)' },
-          scheduled_date: { type: 'string', description: 'Дата в формате YYYY-MM-DD (опционально)' },
-          is_urgent: { type: 'boolean', description: 'Срочная ли задача (опционально)' },
-          deadline_date: { type: 'string', description: 'Дедлайн в формате YYYY-MM-DD (опционально)' },
+          scheduled_date: { type: 'string', description: 'Дата выполнения YYYY-MM-DD. Взаимоисключает deadline_date — не передавай оба поля одновременно.' },
+          is_urgent: { type: 'boolean', description: 'Срочная задача (плавающая, всегда первая в очереди). Взаимоисключает scheduled_date и deadline_date — не передавай их вместе. В очереди допускается ровно одна срочная задача.' },
+          deadline_date: { type: 'string', description: 'Дедлайн YYYY-MM-DD. Взаимоисключает scheduled_date — не передавай оба поля одновременно.' },
           estimated_minutes: { type: 'number', description: 'Оценка времени в минутах (опционально)' },
+          force_overflow: { type: 'boolean', description: 'Передай true если пользователь подтвердил создание задачи сверх вместимости периода. Задача будет помечена is_overflow=true.' },
         },
         required: ['title', 'period_slug'],
       },
@@ -292,8 +293,68 @@ async function executeTool(
       const deadlineDate = typeof args['deadline_date'] === 'string' ? args['deadline_date'] : null
       const estimatedMinutes = typeof args['estimated_minutes'] === 'number' ? args['estimated_minutes'] : null
 
+      logger.debug('[llm/agent] tool:add_task dates', { title, scheduled_date: scheduledDate, deadline_date: deadlineDate })
+
+      if (scheduledDate && deadlineDate) {
+        logger.warn('[llm/agent] tool:add_task: both scheduled_date and deadline_date provided', { title, scheduled_date: scheduledDate, deadline_date: deadlineDate })
+        return { error: 'scheduled_date и deadline_date взаимоисключающие. Уточни у пользователя, что именно он имеет в виду: конкретная дата выполнения или крайний срок.' }
+      }
+
+      if (isUrgent && (scheduledDate || deadlineDate)) {
+        logger.warn('[llm/agent] tool:add_task: is_urgent conflicts with date fields', { title, scheduled_date: scheduledDate, deadline_date: deadlineDate })
+        return { error: 'Срочная задача (is_urgent=true) не может иметь scheduled_date или deadline_date — это плавающая задача без конкретной даты. Убери дату или не ставь флаг срочности.' }
+      }
+
       const queueSlug = matchedPeriod.queue_slug
-      logger.info('[llm/agent] tool:add_task', { title, period_slug: periodSlug, queue_slug: queueSlug, scheduled_date: scheduledDate })
+
+      if (isUrgent) {
+        const existingUrgent = await getUrgentTask(userId, queueSlug)
+        if (existingUrgent) {
+          logger.warn('[llm/agent] tool:add_task: urgent task already exists in queue', { userId, queueSlug, existingTitle: existingUrgent.title })
+          return {
+            urgent_conflict: true,
+            existing_title: existingUrgent.title,
+            message: `В очереди «${matchedPeriod.name}» уже есть срочная задача: «${existingUrgent.title}». В одной очереди может быть только одна срочная задача. Предложи пользователю альтернативу: назначить дедлайн, назначить конкретную дату или отменить создание.`,
+          }
+        }
+      }
+      const forceOverflow = typeof args['force_overflow'] === 'boolean' ? args['force_overflow'] : false
+      let isOverflow = false
+
+      if (scheduledDate) {
+        const [sh, sm] = matchedPeriod.start_time.split(':').map(Number)
+        const [eh, em] = matchedPeriod.end_time.split(':').map(Number)
+        const periodCapacity = (eh * 60 + em) - (sh * 60 + sm)
+        const usedMinutes = await getScheduledMinutes(userId, queueSlug, scheduledDate)
+        const newTaskMinutes = estimatedMinutes ?? 30
+
+        logger.debug('[llm/agent] tool:add_task: capacity check', {
+          userId, queueSlug, scheduledDate, periodCapacity, usedMinutes, newTaskMinutes,
+        })
+
+        if (usedMinutes + newTaskMinutes > periodCapacity && !forceOverflow) {
+          const available = Math.max(0, periodCapacity - usedMinutes)
+          logger.warn('[llm/agent] tool:add_task: overflow detected', {
+            userId, queueSlug, scheduledDate, periodCapacity, usedMinutes, newTaskMinutes, available,
+          })
+          return {
+            overflow_warning: true,
+            available_minutes: available,
+            required_minutes: newTaskMinutes,
+            period_name: matchedPeriod.name,
+            message: `Период «${matchedPeriod.name}» заполнен (доступно ${available} мин, нужно ${newTaskMinutes} мин). Спроси пользователя, добавить задачу сверхурочно.`,
+          }
+        }
+
+        isOverflow = forceOverflow && (usedMinutes + newTaskMinutes > periodCapacity)
+        if (isOverflow) {
+          logger.info('[llm/agent] tool:add_task: overflow confirmed, creating with is_overflow=true', {
+            userId, queueSlug, scheduledDate,
+          })
+        }
+      }
+
+      logger.info('[llm/agent] tool:add_task', { title, period_slug: periodSlug, queue_slug: queueSlug, scheduled_date: scheduledDate, deadline_date: deadlineDate, is_overflow: isOverflow })
 
       const task = await createTask({
         user_id: userId,
@@ -301,6 +362,7 @@ async function executeTool(
         period_slug: queueSlug,
         scheduled_date: scheduledDate,
         is_urgent: isUrgent,
+        is_overflow: isOverflow,
         deadline_date: deadlineDate,
         estimated_minutes: estimatedMinutes,
         source: 'user',
@@ -330,6 +392,43 @@ async function executeTool(
       if (updatesObj['deadline_date'] !== undefined) patch['deadline_date'] = updatesObj['deadline_date']
       if (updatesObj['estimated_minutes'] !== undefined) patch['estimated_minutes'] = updatesObj['estimated_minutes']
       if (updatesObj['status'] !== undefined) patch['status'] = updatesObj['status']
+
+      logger.debug('[llm/agent] tool:update_task patch before date resolution', { taskId: task.id, patch })
+
+      // Mutual exclusivity: reject if both date fields arrive in the same patch
+      if (patch['scheduled_date'] && patch['deadline_date']) {
+        logger.warn('[llm/agent] tool:update_task: both dates in patch simultaneously', { taskId: task.id, patch })
+        return { error: 'scheduled_date и deadline_date взаимоисключающие. Уточни у пользователя, что именно он имеет в виду: конкретная дата выполнения или крайний срок.' }
+      }
+      // Auto-clear the complementary date field to keep them exclusive
+      if (patch['scheduled_date']) {
+        patch['deadline_date'] = null
+        logger.info('[llm/agent] tool:update_task: auto-cleared deadline_date', { taskId: task.id, scheduled_date: patch['scheduled_date'] })
+      }
+      if (patch['deadline_date']) {
+        patch['scheduled_date'] = null
+        logger.info('[llm/agent] tool:update_task: auto-cleared scheduled_date', { taskId: task.id, deadline_date: patch['deadline_date'] })
+      }
+
+      // is_urgent is exclusive with date fields: auto-clear both when setting urgent
+      if (patch['is_urgent'] === true) {
+        patch['scheduled_date'] = null
+        patch['deadline_date'] = null
+        logger.info('[llm/agent] tool:update_task: is_urgent=true, auto-cleared date fields', { taskId: task.id })
+
+        const queueSlug = task.period_slug
+        if (queueSlug) {
+          const existingUrgent = await getUrgentTask(userId, queueSlug, task.id)
+          if (existingUrgent) {
+            logger.warn('[llm/agent] tool:update_task: urgent task already exists in queue', { userId, queueSlug, existingTitle: existingUrgent.title })
+            return {
+              urgent_conflict: true,
+              existing_title: existingUrgent.title,
+              message: `В этой очереди уже есть срочная задача: «${existingUrgent.title}». В одной очереди может быть только одна срочная задача. Предложи пользователю снять срочность с существующей задачи или выбрать другое приоритизирование (дедлайн, конкретная дата).`,
+            }
+          }
+        }
+      }
 
       const updated = await updateTask(task.id, patch)
       logger.info('[llm/agent] task updated', { taskId: updated.id, title: updated.title, patch })
@@ -488,6 +587,9 @@ export async function handleAgentMessage(
 1. ОБЯЗАТЕЛЬНО требуется period_slug — каждая задача должна принадлежать периоду активности.
 2. Если пользователь не указал период — сначала вызови get_periods, покажи список периодов и спроси в каком периоде выполнять задачу. Только после ответа вызывай add_task.
 3. Используй ТОЧНЫЙ slug из get_periods, не придумывай slug самостоятельно.
+4. scheduled_date и deadline_date взаимоисключающие: никогда не передавай оба поля одновременно. Если пользователь указал оба — уточни у него, что именно он имеет в виду.
+5. Если add_task вернул overflow_warning: true — сообщи пользователю что период «{period_name}» заполнен (доступно available_minutes мин, нужно required_minutes мин) и спроси: добавить задачу сверхурочно? Если пользователь согласился — повтори вызов add_task с force_overflow: true. Если отказался — не создавай задачу.
+6. is_urgent — взаимоисключающий флаг: срочная задача не имеет scheduled_date и не имеет deadline_date (она плавающая, всегда первая в очереди). Никогда не передавай is_urgent=true вместе с датами. Если add_task или update_task вернул urgent_conflict: true — сообщи пользователю что в этой очереди уже есть срочная задача (existing_title) и предложи альтернативы: назначить дедлайн, назначить конкретную дату выполнения или отменить создание.
 
 При изменении периодов (update_period, delete_period, create_period):
 1. Сначала вызови get_periods чтобы получить актуальные данные.

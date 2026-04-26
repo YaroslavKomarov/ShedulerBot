@@ -75,6 +75,24 @@ export async function updateUser(id: string, data: DbUserUpdate): Promise<DbUser
   return updated
 }
 
+export async function getUserBySoloLevelingToken(token: string): Promise<DbUser | null> {
+  logger.debug('[db/users] getUserBySoloLevelingToken', { tokenPrefix: token.slice(0, 8) })
+
+  const { data, error } = await supabase
+    .from('sch_users')
+    .select('*')
+    .eq('solo_leveling_token', token)
+    .maybeSingle()
+
+  if (error) {
+    logger.error('[db/users] getUserBySoloLevelingToken error', { error: error.message })
+    throw new Error(`Failed to get user by solo_leveling_token: ${error.message}`)
+  }
+
+  logger.debug('[db/users] getUserBySoloLevelingToken result', { found: data !== null })
+  return data
+}
+
 export async function getAllUsersForCron(): Promise<DbUser[]> {
   logger.debug('[db/users] getAllUsersForCron')
 

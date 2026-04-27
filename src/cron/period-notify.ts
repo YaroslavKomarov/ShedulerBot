@@ -29,12 +29,28 @@ export async function sendPeriodPreview(user: DbUser, period: DbPeriod): Promise
     const unassigned = await getUnassignedTodayTasks(user.id, date)
     const seenIds = new Set(tasks.map((t) => t.id))
     const allTasks = [...tasks, ...unassigned.filter((t) => !seenIds.has(t.id))]
-    const preview = allTasks.slice(0, 5)
+
+    const { slots, overflow } = buildSlots(period, allTasks)
+    const placedTasks = slots.map((s) => s.task)
+    const guaranteed = injectGuaranteedTasks(placedTasks, allTasks, date)
+    const displayTasks = [...placedTasks, ...guaranteed]
+
+    logger.info('[FIX] sendPeriodPreview: slotted tasks', {
+      userId: user.id,
+      periodSlug: period.slug,
+      totalQueue: allTasks.length,
+      slotted: displayTasks.length,
+      overflow,
+    })
+
+    const preview = displayTasks.slice(0, 5)
+    const overflowLine = overflow > 0 ? `\n_...и ещё ${overflow} задач не влезли в период_` : ''
 
     const text =
       `⏰ Через 10 минут начинается *${period.name}* (${period.start_time}–${period.end_time})\n\n` +
       `Задачи:\n${formatTaskList(preview)}` +
-      (allTasks.length > 5 ? `\n_...и ещё ${allTasks.length - 5}_` : '')
+      (displayTasks.length > 5 ? `\n_...и ещё ${displayTasks.length - 5}_` : '') +
+      overflowLine
 
     await bot.api.sendMessage(user.telegram_id, text, { parse_mode: 'Markdown' })
   } catch (err) {
@@ -138,11 +154,26 @@ export async function sendPeriodEnd(user: DbUser, period: DbPeriod): Promise<voi
 
   try {
     const { date } = getTodayInTimezone(user.timezone)
-    const pendingTasks = await getTaskQueue(user.id, period.queue_slug, date)
+    const queueTasks = await getTaskQueue(user.id, period.queue_slug, date)
+    const unassigned = await getUnassignedTodayTasks(user.id, date)
+    const seenIds = new Set(queueTasks.map((t) => t.id))
+    const allTasks = [...queueTasks, ...unassigned.filter((t) => !seenIds.has(t.id))]
+
+    const { slots } = buildSlots(period, allTasks)
+    const placedTasks = slots.map((s) => s.task)
+    const guaranteed = injectGuaranteedTasks(placedTasks, allTasks, date)
+    const plannedTasks = [...placedTasks, ...guaranteed]
+
+    logger.info('[FIX] sendPeriodEnd: planned pending tasks', {
+      userId: user.id,
+      periodSlug: period.slug,
+      totalQueue: allTasks.length,
+      plannedPending: plannedTasks.length,
+    })
 
     const taskListText =
-      pendingTasks.length > 0
-        ? `\n\n*Незавершённые задачи:*\n${formatTaskList(pendingTasks)}`
+      plannedTasks.length > 0
+        ? `\n\n*Незавершённые задачи:*\n${formatTaskList(plannedTasks)}`
         : '\n\n✅ Все задачи выполнены!'
 
     const text = `✅ Период *${period.name}* завершён! Что удалось сделать?${taskListText}`

@@ -1,7 +1,7 @@
-# Implementation Plan: Urgent Flag Rules and Constraints
+# Implementation Plan: Agent Quality Improvements
 
 Branch: master
-Created: 2026-04-26
+Created: 2026-04-28
 
 ## Settings
 - Testing: no
@@ -9,81 +9,130 @@ Created: 2026-04-26
 
 ## Context
 
-`is_urgent` не имеет ограничений:
-1. Срочная задача может одновременно иметь `scheduled_date` или `deadline_date`
-2. В одной очереди (`queue_slug`) может быть несколько срочных задач
-
-Ожидаемое поведение:
-- `is_urgent=true` → задача плавающая: без `scheduled_date`, без `deadline_date`
-- В очереди одновременно допускается ровно одна срочная задача
+Агент (LLM через OpenRouter, модель Gemini 2.0 Flash) часто не даёт правильного результата
+с первой попытки. Основные причины:
+1. Периоды (slugs) не известны агенту заранее → первый шаг всегда `get_periods` (лишняя итерация)
+2. Нет алгоритма парсинга дат в промпте → "завтра", "в пятницу" угадываются
+3. Нет примеров вызовов инструментов → LLM не видит образца поведения
+4. Историческое окно 10 сообщений — чуть мало для связного диалога
 
 ## Tasks
 
-### Phase 1: DB
+### Phase 1: Контекстное окно
 
-- [x] Task 1: Добавить `getUrgentTask` в `src/db/tasks.ts`
+- [x] Task 1: Увеличить HISTORY_LIMIT до 15 (`src/db/chat-history.ts`)
 
-### Phase 2: Agent tool validation
+### Phase 2: Системный промпт
 
-- [ ] Task 2: Валидация `is_urgent` в `add_task` (`src/llm/agent-query.ts`)
-- [ ] Task 3: Валидация `is_urgent` в `update_task` (`src/llm/agent-query.ts`)
-- [ ] Task 4: Обновить системный промпт и описание инструмента `add_task`
+- [x] Task 2: Pre-load периодов в системный промпт (`src/llm/agent-query.ts`)
+- [x] Task 3: Добавить алгоритм парсинга дат в системный промпт (`src/llm/agent-query.ts`)
+- [x] Task 4: Добавить примеры вызовов инструментов в системный промпт (`src/llm/agent-query.ts`)
+
+---
 
 ## Task Details
 
-### Task 1 — `getUrgentTask` в `src/db/tasks.ts`
+### Task 1 — HISTORY_LIMIT = 15
 
+Файл: `src/db/chat-history.ts`
+
+Изменить:
 ```ts
-export async function getUrgentTask(
-  userId: string,
-  queueSlug: string,
-  excludeTaskId?: string,
-): Promise<DbTask | null>
+const HISTORY_LIMIT = 10  →  const HISTORY_LIMIT = 15
 ```
 
-Запрос: `user_id=userId`, `period_slug=queueSlug`, `is_urgent=true`, `status=pending`.
-Если `excludeTaskId` передан — добавить `.neq('id', excludeTaskId)`.
-Возвращает `maybeSingle()`.
+Константа используется в двух местах: `getChatHistory` (limit) и `saveChatMessage` (.range(HISTORY_LIMIT, 10000)).
+Оба обновятся автоматически.
+
+Логирование: уже есть `[db/chat-history] getChatHistory error` и `saveChatMessage error`.
+Дополнительного логирования не нужно.
+
+---
+
+### Task 2 — Pre-load периодов
+
+Файл: `src/llm/agent-query.ts`, функция `handleAgentMessage`
+
+Добавить вызов `getUserPeriods(userId)` перед построением `systemPrompt`.
+Функция уже импортирована в начале файла.
+
+Форматировать как компактный блок:
+```
+Периоды активности пользователя (используй эти slug-и для add_task):
+• Утренняя рутина  slug=morning  queue=morning  07:00–08:00  Пн–Пт
+• Работа           slug=work     queue=work     09:00–18:00  Пн–Пт
+• Спорт            slug=sport    queue=sport    19:00–20:00  Пн,Ср,Пт
+```
+
+Для `days_of_week` массива (числа 0–6 = Вс–Сб или 1–7 = Пн–Вс — уточни по схеме)
+→ использовать сокращения: Пн, Вт, Ср, Чт, Пт, Сб, Вс.
+
+Вставить этот блок **после** первого абзаца системного промпта, **перед** секцией
+"При создании задачи (add_task)".
+
+Если периодов нет → вставить: `_Периоды не настроены. Сначала создай период._`
 
 Логирование:
 ```
-[db/tasks] getUrgentTask { userId, queueSlug, excludeTaskId }
-[db/tasks] getUrgentTask result { userId, queueSlug, found }
+logger.debug('[llm/agent] preloaded periods', { userId, count: periods.length })
 ```
 
-### Task 2 — Валидация `is_urgent` в `add_task`
+---
 
-После проверки `scheduledDate && deadlineDate` добавить:
+### Task 3 — Алгоритм парсинга дат
+
+Файл: `src/llm/agent-query.ts`, в `systemPrompt`
+
+Добавить секцию **"Парсинг дат"** после секции про queue_slug:
 
 ```
-if (isUrgent && (scheduledDate || deadlineDate)) {
-  return { error: '...' }
-}
-if (isUrgent) {
-  const existing = await getUrgentTask(userId, queueSlug)
-  if (existing) {
-    return {
-      urgent_conflict: true,
-      existing_title: existing.title,
-      message: 'В очереди уже есть срочная задача...'
-    }
-  }
-}
+Парсинг дат (текущая дата: ${today}, часовой пояс: ${user.timezone}):
+- "сегодня" → ${today}
+- "завтра" → <today + 1 день>
+- "послезавтра" → <today + 2 дня>
+- "через N дней" → <today + N дней>
+- "через неделю" → <today + 7 дней>
+- "в понедельник/вторник/..." → ближайший такой день недели начиная с завтра
+- "на следующей неделе в [день]" → [день] следующей ISO-недели
+- "до [дня]" → это deadline_date (крайний срок), а не scheduled_date
+- "в [день]" или "на [день]" → это scheduled_date (конкретная дата выполнения)
+Всегда вычисляй дату самостоятельно и передавай в формате YYYY-MM-DD.
+Никогда не спрашивай пользователя "какую дату вы имеете в виду" если можно вычислить.
 ```
 
-### Task 3 — Валидация `is_urgent` в `update_task`
+Алгоритм расчёта дня недели нужно описать словами — LLM умеет считать дни, если дать явный алгоритм.
 
-Если `patch['is_urgent'] === true`:
-- Авто-очищать `scheduled_date` и `deadline_date` (аналогично авто-очистке дат)
-- Проверить нет ли другой срочной задачи в той же очереди (через `task.period_slug`)
-- При конфликте вернуть `urgent_conflict: true` с именем существующей задачи
+---
 
-Если `patch['is_urgent'] === false` — просто снять флаг, без доп. проверок.
+### Task 4 — Примеры в системный промпт
 
-### Task 4 — Системный промпт и описание инструмента
+Файл: `src/llm/agent-query.ts`, в конце `systemPrompt` (перед `Отвечай кратко...`)
 
-В `is_urgent` description добавить:
-- взаимоисключаемость с `scheduled_date` и `deadline_date`
-- ограничение: одна срочная задача на очередь
+Добавить секцию **"Примеры"** с 3 сценариями:
 
-В системный промпт: добавить пункт 6 в секцию `add_task` про правила `is_urgent`.
+**Пример 1: создание задачи с датой**
+```
+Пользователь: "добавь задачу написать отчёт на завтра в Работу"
+→ вычислить завтра = <дата>
+→ add_task(title="написать отчёт", period_slug="work", scheduled_date="<дата>")
+→ ответ: "Добавил задачу «написать отчёт» на <дата> в «Работа»."
+```
+
+**Пример 2: создание задачи без указания периода**
+```
+Пользователь: "добавь задачу купить продукты"
+→ get_periods() → показать список
+→ "В каком периоде выполнить задачу?"
+→ Пользователь: "в спорт"
+→ add_task(title="купить продукты", period_slug="sport")
+→ ответ: "Добавил задачу «купить продукты» в «Спорт»."
+```
+
+**Пример 3: отметить задачу выполненной**
+```
+Пользователь: "отметь отчёт как выполненный"
+→ mark_done(title_query="отчёт")
+→ ответ: "Готово, задача «написать отчёт» выполнена."
+```
+
+Примеры размещать как plain-text блок (не code), чтобы не перегружать токены.

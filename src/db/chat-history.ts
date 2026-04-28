@@ -3,7 +3,7 @@ import { logger } from '../lib/logger.js'
 
 const db = supabase
 
-const HISTORY_LIMIT = 10
+const HISTORY_LIMIT = 15
 
 export interface ChatMessage {
   role: 'user' | 'assistant'

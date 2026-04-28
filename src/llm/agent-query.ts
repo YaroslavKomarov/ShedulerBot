@@ -569,6 +569,29 @@ async function executeTool(
   }
 }
 
+const DAY_NAMES: Record<number, string> = { 1: 'Пн', 2: 'Вт', 3: 'Ср', 4: 'Чт', 5: 'Пт', 6: 'Сб', 7: 'Вс' }
+
+function formatDays(days: number[]): string {
+  return days.map((d) => DAY_NAMES[d] ?? String(d)).join(',')
+}
+
+function addDays(isoDate: string, n: number): string {
+  // Use UTC noon to avoid DST shifts changing the calendar date
+  const d = new Date(isoDate + 'T12:00:00Z')
+  d.setUTCDate(d.getUTCDate() + n)
+  return d.toISOString().slice(0, 10)
+}
+
+const JS_DAY_NAMES: Record<number, string> = { 0: 'Вс', 1: 'Пн', 2: 'Вт', 3: 'Ср', 4: 'Чт', 5: 'Пт', 6: 'Сб' }
+
+function nextWeekday(fromIso: string, targetJsDay: number): string {
+  // Returns first occurrence of targetJsDay (0=Вс…6=Сб) starting from tomorrow
+  const d = new Date(fromIso + 'T12:00:00Z')
+  d.setUTCDate(d.getUTCDate() + 1)
+  while (d.getUTCDay() !== targetJsDay) d.setUTCDate(d.getUTCDate() + 1)
+  return d.toISOString().slice(0, 10)
+}
+
 export async function handleAgentMessage(
   user: DbUser,
   userMessage: string,
@@ -579,9 +602,24 @@ export async function handleAgentMessage(
 
   logger.debug('[llm/agent] start', { userId, message: userMessage.slice(0, 60), historyLen: history.length })
 
+  const periods = await getUserPeriods(userId)
+  logger.debug('[llm/agent] preloaded periods', { userId, count: periods.length })
+
+  const periodsBlock = periods.length > 0
+    ? `Периоды активности пользователя (используй эти slug-и для add_task):\n${periods.map((p) => `• ${p.name}  slug=${p.slug}  queue=${p.queue_slug}  ${p.start_time}–${p.end_time}  ${formatDays(p.days_of_week)}`).join('\n')}`
+    : `_Периоды не настроены. Сначала создай период._`
+
+  const tomorrow = addDays(today, 1)
+  const dayAfterTomorrow = addDays(today, 2)
+  const nextWeek = addDays(today, 7)
+  const todayDayName = JS_DAY_NAMES[new Date(today + 'T12:00:00Z').getUTCDay()] ?? ''
+  const nextFriday = nextWeekday(today, 5)
+
   const systemPrompt = `Ты — умный ассистент-планировщик. Ты обрабатываешь ВСЕ запросы пользователя: вопросы, создание задач, редактирование, отмену и завершение, а также изменение периодов активности.
 Используй доступные инструменты для получения и изменения данных в базе.
 Текущая дата: ${today}. Часовой пояс пользователя: ${user.timezone}.
+
+${periodsBlock}
 
 При создании задачи (add_task):
 1. ОБЯЗАТЕЛЬНО требуется period_slug — каждая задача должна принадлежать периоду активности.
@@ -602,6 +640,40 @@ export async function handleAgentMessage(
 - Если у двух периодов одинаковый queue_slug, они делят одну очередь задач (задачи добавленные в один период видны в другом).
 - Чтобы объединить очереди двух периодов: вызови update_period для каждого и установи им одинаковый queue_slug (например, "work").
 - Чтобы разделить: верни каждому периоду свой уникальный queue_slug.
+
+Парсинг дат (текущая дата: ${today}, часовой пояс: ${user.timezone}):
+- "сегодня" → ${today}
+- "завтра" → ${tomorrow}
+- "послезавтра" → ${dayAfterTomorrow}
+- "через N дней" → прибавь N дней к ${today}
+- "через неделю" → ${nextWeek}
+- "в понедельник/вторник/..." → ближайший такой день недели начиная с завтра: начни с ${tomorrow} и прибавляй по одному дню пока не попадёшь на нужный день недели. Пример: сегодня ${today} (${todayDayName}), "в пятницу" → ${nextFriday}
+- "на следующей неделе в [день]" → [день] следующей ISO-недели (Пн–Вс), начало следующей недели = ближайший понедельник после ${today} + 7 дней
+- "до [дня]" → это deadline_date (крайний срок), а не scheduled_date
+- "в [день]" или "на [день]" → это scheduled_date (конкретная дата выполнения)
+Всегда вычисляй дату самостоятельно и передавай в формате YYYY-MM-DD.
+Никогда не спрашивай пользователя "какую дату вы имеете в виду" если можно вычислить.
+
+Примеры:
+
+Пример 1: создание задачи с датой
+Пользователь: "добавь задачу написать отчёт на завтра в Работу"
+→ вычислить завтра = ${tomorrow}
+→ add_task(title="написать отчёт", period_slug="work", scheduled_date="${tomorrow}")
+→ ответ: "Добавил задачу «написать отчёт» на ${tomorrow} в «Работа»."
+
+Пример 2: создание задачи без указания периода
+Пользователь: "добавь задачу купить продукты"
+→ периоды уже известны из системного промпта → показать список пользователю
+→ "В каком периоде выполнить задачу?"
+→ Пользователь: "в спорт"
+→ add_task(title="купить продукты", period_slug="sport")
+→ ответ: "Добавил задачу «купить продукты» в «Спорт»."
+
+Пример 3: отметить задачу выполненной
+Пользователь: "отметь отчёт как выполненный"
+→ mark_done(title_query="отчёт")
+→ ответ: "Готово, задача «написать отчёт» выполнена."
 
 Отвечай кратко и по делу. Используй русский язык.`
 

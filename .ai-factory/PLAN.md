@@ -1,138 +1,71 @@
-# Implementation Plan: Agent Quality Improvements
+# Implementation Plan: Mark task as completed via external API
 
 Branch: master
-Created: 2026-04-28
+Created: 2026-04-30
 
 ## Settings
-- Testing: no
-- Logging: structured, existing convention `[module/function] message {data}`
+- Testing: yes
+- Logging: verbose, existing convention `[module/function] message {data}`
 
-## Context
+## Overview
 
-Агент (LLM через OpenRouter, модель Gemini 2.0 Flash) часто не даёт правильного результата
-с первой попытки. Основные причины:
-1. Периоды (slugs) не известны агенту заранее → первый шаг всегда `get_periods` (лишняя итерация)
-2. Нет алгоритма парсинга дат в промпте → "завтра", "в пятницу" угадываются
-3. Нет примеров вызовов инструментов → LLM не видит образца поведения
-4. Историческое окно 10 сообщений — чуть мало для связного диалога
+Add `POST /api/tasks/:externalId/complete` endpoint. All required DB helpers already exist
+(`findTaskByExternalId`, `updateTask`); the change is confined to one route file and one test file.
 
 ## Tasks
 
-### Phase 1: Контекстное окно
+### Phase 1: Route implementation
 
-- [x] Task 1: Увеличить HISTORY_LIMIT до 15 (`src/db/chat-history.ts`)
+- [x] Task 1: Add `POST /api/tasks/:externalId/complete` handler in `src/routes/tasks.ts`
 
-### Phase 2: Системный промпт
+  Add the handler after the existing `/tasks/batch` route.
 
-- [x] Task 2: Pre-load периодов в системный промпт (`src/llm/agent-query.ts`)
-- [x] Task 3: Добавить алгоритм парсинга дат в системный промпт (`src/llm/agent-query.ts`)
-- [x] Task 4: Добавить примеры вызовов инструментов в системный промпт (`src/llm/agent-query.ts`)
+  **Request schema (Zod):**
+  ```ts
+  const CompleteTaskSchema = z.object({ schedulerbot_token: z.string().min(1) })
+  ```
 
----
+  **Import update (line 6 of the file):**
+  Add `updateTask` to the existing import from `'../db/tasks.js'`.
 
-## Task Details
+  **Handler logic:**
+  1. Auth: check `x-api-key` header against `process.env.API_SECRET_KEY` → 401 if invalid
+  2. Parse + validate body with `CompleteTaskSchema` → 400 if invalid
+  3. `getUserBySoloLevelingToken(schedulerbot_token)` → 404 `{ error: 'User not found' }` if null
+  4. `findTaskByExternalId(user.id, externalId)` → 404 `{ error: 'Task not found' }` if null
+  5. If `task.status !== 'pending'` → 200 `{ success: true }` (idempotent: covers both `done` and `cancelled`)
+  6. `updateTask(task.id, { status: 'done' })` → 200 `{ success: true }`
 
-### Task 1 — HISTORY_LIMIT = 15
+  **Logging requirements:**
+  - Entry: INFO `[routes/tasks] POST /api/tasks/:externalId/complete` with `{ externalId, hasToken }`
+  - Auth failure: WARN with `{ ip }`
+  - User not found: WARN with `{ externalId, hasToken: !!schedulerbot_token }`
+  - Task not found: WARN with `{ externalId, userId }`
+  - Idempotent hit: INFO with `{ externalId, taskId, status: 'already done' }`
+  - Success: INFO with `{ externalId, taskId, userId }`
+  - Unexpected errors: ERROR with `{ error: err.message }`
 
-Файл: `src/db/chat-history.ts`
+  Files: `src/routes/tasks.ts`
 
-Изменить:
-```ts
-const HISTORY_LIMIT = 10  →  const HISTORY_LIMIT = 15
-```
+### Phase 2: Tests
 
-Константа используется в двух местах: `getChatHistory` (limit) и `saveChatMessage` (.range(HISTORY_LIMIT, 10000)).
-Оба обновятся автоматически.
+- [x] Task 2: Add tests for the new endpoint in `src/routes/__tests__/tasks.test.ts`
 
-Логирование: уже есть `[db/chat-history] getChatHistory error` и `saveChatMessage error`.
-Дополнительного логирования не нужно.
+  **Setup changes:**
+  1. Add `updateTask` to the existing `vi.mock('../../db/tasks.js', ...)` mock object
+  2. Add `import { ..., updateTask } from '../../db/tasks.js'` to the imports block
+  3. Add `const mockUpdateTask = vi.mocked(updateTask)` with other mock variables
+  4. In `beforeEach`: add `mockUpdateTask.mockResolvedValue({ ...MOCK_TASK, status: 'done' })`
 
----
+  **Test cases (new `describe` block):**
 
-### Task 2 — Pre-load периодов
+  - 401 — missing or wrong `x-api-key`
+  - 400 — missing `schedulerbot_token` in body
+  - 404 — user not found (token unknown)
+  - 404 — task not found (wrong externalId for this user)
+  - 200 — `status: 'done'` already: `updateTask` NOT called (idempotency verified)
+  - 200 — `status: 'cancelled'`: `updateTask` NOT called (idempotent for cancelled too)
+  - 200 — happy path: `updateTask` called with `{ status: 'done' }`, response `{ success: true }`
+  - 500 — `updateTask` throws DB error → returns 500
 
-Файл: `src/llm/agent-query.ts`, функция `handleAgentMessage`
-
-Добавить вызов `getUserPeriods(userId)` перед построением `systemPrompt`.
-Функция уже импортирована в начале файла.
-
-Форматировать как компактный блок:
-```
-Периоды активности пользователя (используй эти slug-и для add_task):
-• Утренняя рутина  slug=morning  queue=morning  07:00–08:00  Пн–Пт
-• Работа           slug=work     queue=work     09:00–18:00  Пн–Пт
-• Спорт            slug=sport    queue=sport    19:00–20:00  Пн,Ср,Пт
-```
-
-Для `days_of_week` массива (числа 0–6 = Вс–Сб или 1–7 = Пн–Вс — уточни по схеме)
-→ использовать сокращения: Пн, Вт, Ср, Чт, Пт, Сб, Вс.
-
-Вставить этот блок **после** первого абзаца системного промпта, **перед** секцией
-"При создании задачи (add_task)".
-
-Если периодов нет → вставить: `_Периоды не настроены. Сначала создай период._`
-
-Логирование:
-```
-logger.debug('[llm/agent] preloaded periods', { userId, count: periods.length })
-```
-
----
-
-### Task 3 — Алгоритм парсинга дат
-
-Файл: `src/llm/agent-query.ts`, в `systemPrompt`
-
-Добавить секцию **"Парсинг дат"** после секции про queue_slug:
-
-```
-Парсинг дат (текущая дата: ${today}, часовой пояс: ${user.timezone}):
-- "сегодня" → ${today}
-- "завтра" → <today + 1 день>
-- "послезавтра" → <today + 2 дня>
-- "через N дней" → <today + N дней>
-- "через неделю" → <today + 7 дней>
-- "в понедельник/вторник/..." → ближайший такой день недели начиная с завтра
-- "на следующей неделе в [день]" → [день] следующей ISO-недели
-- "до [дня]" → это deadline_date (крайний срок), а не scheduled_date
-- "в [день]" или "на [день]" → это scheduled_date (конкретная дата выполнения)
-Всегда вычисляй дату самостоятельно и передавай в формате YYYY-MM-DD.
-Никогда не спрашивай пользователя "какую дату вы имеете в виду" если можно вычислить.
-```
-
-Алгоритм расчёта дня недели нужно описать словами — LLM умеет считать дни, если дать явный алгоритм.
-
----
-
-### Task 4 — Примеры в системный промпт
-
-Файл: `src/llm/agent-query.ts`, в конце `systemPrompt` (перед `Отвечай кратко...`)
-
-Добавить секцию **"Примеры"** с 3 сценариями:
-
-**Пример 1: создание задачи с датой**
-```
-Пользователь: "добавь задачу написать отчёт на завтра в Работу"
-→ вычислить завтра = <дата>
-→ add_task(title="написать отчёт", period_slug="work", scheduled_date="<дата>")
-→ ответ: "Добавил задачу «написать отчёт» на <дата> в «Работа»."
-```
-
-**Пример 2: создание задачи без указания периода**
-```
-Пользователь: "добавь задачу купить продукты"
-→ get_periods() → показать список
-→ "В каком периоде выполнить задачу?"
-→ Пользователь: "в спорт"
-→ add_task(title="купить продукты", period_slug="sport")
-→ ответ: "Добавил задачу «купить продукты» в «Спорт»."
-```
-
-**Пример 3: отметить задачу выполненной**
-```
-Пользователь: "отметь отчёт как выполненный"
-→ mark_done(title_query="отчёт")
-→ ответ: "Готово, задача «написать отчёт» выполнена."
-```
-
-Примеры размещать как plain-text блок (не code), чтобы не перегружать токены.
+  Files: `src/routes/__tests__/tasks.test.ts`

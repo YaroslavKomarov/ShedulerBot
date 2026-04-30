@@ -10,14 +10,14 @@ vi.mock('../../db/users.js', () => ({
   getUserByTelegramId: vi.fn(),
   getUserBySoloLevelingToken: vi.fn(),
 }))
-vi.mock('../../db/tasks.js', () => ({ createTask: vi.fn(), findTaskByExternalId: vi.fn() }))
+vi.mock('../../db/tasks.js', () => ({ createTask: vi.fn(), findTaskByExternalId: vi.fn(), updateTask: vi.fn() }))
 vi.mock('../../db/periods.js', () => ({ getUserPeriods: vi.fn() }))
 vi.mock('../../bot/index.js', () => ({
   bot: { api: { sendMessage: vi.fn() } },
 }))
 
 import { getUserByTelegramId, getUserBySoloLevelingToken } from '../../db/users.js'
-import { createTask, findTaskByExternalId } from '../../db/tasks.js'
+import { createTask, findTaskByExternalId, updateTask } from '../../db/tasks.js'
 import { getUserPeriods } from '../../db/periods.js'
 import { bot } from '../../bot/index.js'
 import { tasksRouter } from '../tasks.js'
@@ -26,6 +26,7 @@ const mockGetUser = vi.mocked(getUserByTelegramId)
 const mockGetUserByToken = vi.mocked(getUserBySoloLevelingToken)
 const mockCreateTask = vi.mocked(createTask)
 const mockFindByExternalId = vi.mocked(findTaskByExternalId)
+const mockUpdateTask = vi.mocked(updateTask)
 const mockGetUserPeriods = vi.mocked(getUserPeriods)
 const mockSendMessage = vi.mocked(bot.api.sendMessage)
 
@@ -76,6 +77,7 @@ beforeEach(() => {
   vi.stubEnv('API_SECRET_KEY', API_KEY)
   mockGetUserPeriods.mockResolvedValue([])
   mockFindByExternalId.mockResolvedValue(null)
+  mockUpdateTask.mockResolvedValue({ ...MOCK_TASK, status: 'done' })
 })
 
 describe('POST /api/tasks', () => {
@@ -438,5 +440,123 @@ describe('POST /api/tasks/batch', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.created).toBe(1)
+  })
+})
+
+describe('POST /api/tasks/:externalId/complete', () => {
+  const EXTERNAL_ID = 'ext-uuid-1'
+  const VALID_COMPLETE_BODY = { schedulerbot_token: 'sl-token-abc' }
+  const PENDING_TASK = { ...MOCK_TASK, external_id: EXTERNAL_ID, status: 'pending' as const }
+
+  it('returns 401 when X-Api-Key is missing', async () => {
+    const res = await request(app)
+      .post(`/api/tasks/${EXTERNAL_ID}/complete`)
+      .send(VALID_COMPLETE_BODY)
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('returns 401 when X-Api-Key is wrong', async () => {
+    const res = await request(app)
+      .post(`/api/tasks/${EXTERNAL_ID}/complete`)
+      .set('X-Api-Key', 'wrong-key')
+      .send(VALID_COMPLETE_BODY)
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('returns 400 when schedulerbot_token is missing', async () => {
+    const res = await request(app)
+      .post(`/api/tasks/${EXTERNAL_ID}/complete`)
+      .set('X-Api-Key', API_KEY)
+      .send({})
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('Bad Request')
+  })
+
+  it('returns 404 when user not found by token', async () => {
+    mockGetUserByToken.mockResolvedValue(null)
+
+    const res = await request(app)
+      .post(`/api/tasks/${EXTERNAL_ID}/complete`)
+      .set('X-Api-Key', API_KEY)
+      .send(VALID_COMPLETE_BODY)
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'User not found' })
+    expect(mockUpdateTask).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 when task not found by externalId for this user', async () => {
+    mockGetUserByToken.mockResolvedValue(MOCK_USER)
+    mockFindByExternalId.mockResolvedValue(null)
+
+    const res = await request(app)
+      .post(`/api/tasks/${EXTERNAL_ID}/complete`)
+      .set('X-Api-Key', API_KEY)
+      .send(VALID_COMPLETE_BODY)
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'Task not found' })
+    expect(mockUpdateTask).not.toHaveBeenCalled()
+  })
+
+  it('returns 200 without calling updateTask when task is already done', async () => {
+    mockGetUserByToken.mockResolvedValue(MOCK_USER)
+    mockFindByExternalId.mockResolvedValue({ ...PENDING_TASK, status: 'done' })
+
+    const res = await request(app)
+      .post(`/api/tasks/${EXTERNAL_ID}/complete`)
+      .set('X-Api-Key', API_KEY)
+      .send(VALID_COMPLETE_BODY)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true })
+    expect(mockUpdateTask).not.toHaveBeenCalled()
+  })
+
+  it('returns 200 without calling updateTask when task is cancelled', async () => {
+    mockGetUserByToken.mockResolvedValue(MOCK_USER)
+    mockFindByExternalId.mockResolvedValue({ ...PENDING_TASK, status: 'cancelled' })
+
+    const res = await request(app)
+      .post(`/api/tasks/${EXTERNAL_ID}/complete`)
+      .set('X-Api-Key', API_KEY)
+      .send(VALID_COMPLETE_BODY)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true })
+    expect(mockUpdateTask).not.toHaveBeenCalled()
+  })
+
+  it('returns 200 and calls updateTask with status done on success', async () => {
+    mockGetUserByToken.mockResolvedValue(MOCK_USER)
+    mockFindByExternalId.mockResolvedValue(PENDING_TASK)
+
+    const res = await request(app)
+      .post(`/api/tasks/${EXTERNAL_ID}/complete`)
+      .set('X-Api-Key', API_KEY)
+      .send(VALID_COMPLETE_BODY)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true })
+    expect(mockUpdateTask).toHaveBeenCalledWith(PENDING_TASK.id, { status: 'done' })
+  })
+
+  it('returns 500 when updateTask throws', async () => {
+    mockGetUserByToken.mockResolvedValue(MOCK_USER)
+    mockFindByExternalId.mockResolvedValue(PENDING_TASK)
+    mockUpdateTask.mockRejectedValue(new Error('DB connection lost'))
+
+    const res = await request(app)
+      .post(`/api/tasks/${EXTERNAL_ID}/complete`)
+      .set('X-Api-Key', API_KEY)
+      .send(VALID_COMPLETE_BODY)
+
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ error: 'Internal Server Error' })
   })
 })

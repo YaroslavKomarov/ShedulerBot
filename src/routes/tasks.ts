@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { bot } from '../bot/index.js'
 import { getUserByTelegramId, getUserBySoloLevelingToken } from '../db/users.js'
-import { createTask, findTaskByExternalId } from '../db/tasks.js'
+import { createTask, findTaskByExternalId, updateTask } from '../db/tasks.js'
 import { getUserPeriods } from '../db/periods.js'
 import { logger } from '../lib/logger.js'
 
@@ -310,6 +310,77 @@ tasksRouter.post('/tasks/batch', async (req, res) => {
     })
   } catch (err) {
     logger.error('[routes/tasks] batch error', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    res.status(500).json({ error: 'Internal Server Error' })
+  }
+})
+
+const CompleteTaskSchema = z.object({ schedulerbot_token: z.string().min(1) })
+
+tasksRouter.post('/tasks/:externalId/complete', async (req, res) => {
+  const { externalId } = req.params
+  const apiKey = req.headers['x-api-key']
+  const expectedKey = process.env.API_SECRET_KEY
+
+  logger.info('[routes/tasks] POST /api/tasks/:externalId/complete', {
+    externalId,
+    hasToken: !!req.body?.schedulerbot_token,
+  })
+
+  if (!apiKey || apiKey !== expectedKey) {
+    logger.warn('[routes/tasks] complete unauthorized', { ip: req.ip })
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const parsed = CompleteTaskSchema.safeParse(req.body)
+  if (!parsed.success) {
+    logger.debug('[routes/tasks] complete validation failed', { errors: parsed.error.format() })
+    res.status(400).json({ error: 'Bad Request', details: parsed.error.format() })
+    return
+  }
+
+  const { schedulerbot_token } = parsed.data
+
+  try {
+    const user = await getUserBySoloLevelingToken(schedulerbot_token)
+    if (!user) {
+      logger.warn('[routes/tasks] complete user not found', {
+        externalId,
+        hasToken: !!schedulerbot_token,
+      })
+      res.status(404).json({ error: 'User not found' })
+      return
+    }
+
+    const task = await findTaskByExternalId(user.id, externalId)
+    if (!task) {
+      logger.warn('[routes/tasks] complete task not found', { externalId, userId: user.id })
+      res.status(404).json({ error: 'Task not found' })
+      return
+    }
+
+    if (task.status !== 'pending') {
+      logger.info('[routes/tasks] complete idempotent hit', {
+        externalId,
+        taskId: task.id,
+        status: task.status,
+      })
+      res.status(200).json({ success: true })
+      return
+    }
+
+    await updateTask(task.id, { status: 'done' })
+    logger.info('[routes/tasks] complete success', {
+      externalId,
+      taskId: task.id,
+      userId: user.id,
+    })
+    res.status(200).json({ success: true })
+  } catch (err) {
+    logger.error('[routes/tasks] complete error', {
+      externalId,
       error: err instanceof Error ? err.message : String(err),
     })
     res.status(500).json({ error: 'Internal Server Error' })

@@ -8,6 +8,7 @@ import { registerUserCrons, unregisterUserCrons } from '../../cron/manager.js'
 import { getAuthUrl } from '../../calendar/auth.js'
 import { logger } from '../../lib/logger.js'
 import { sendPeriodsToSoloLeveling, syncUserPeriodsToSoloLeveling } from '../../lib/solo-leveling.js'
+import type { DbUser } from '../../types/index.js'
 
 type SettingsConversation = Conversation<BotContext, BotContext>
 
@@ -66,7 +67,7 @@ export async function settingsConversation(
 
     if (action === 'set_solo_leveling_unlink') {
       user = await conversation.external(() => updateUser(user!.id, { solo_leveling_token: null }))
-      logger.info('[FIX][conversation/settings] SoloLeveling token cleared', { userId: user.id })
+      logger.info('[conversation/settings] SoloLeveling token cleared', { userId: user.id })
       await ctx.reply('⛓️ SoloLeveling отвязан.', { reply_markup: buildSettingsKeyboard(false) })
       continue
     }
@@ -97,59 +98,82 @@ export async function settingsConversation(
       await ctx.reply(`✅ Конец дня: ${user.end_of_day_time}`, { reply_markup: buildSettingsKeyboard(!!user?.solo_leveling_token) })
     } else if (action === 'set_solo_leveling') {
       if (user!.solo_leveling_token) {
-        // Token exists — auto-sync
-        logger.info('[FIX][conversation/settings] token exists, auto-syncing', { userId: user!.id })
-        await conversation.external(async () => {
+        // Token exists — auto-sync.
+        // ctx.reply() must be OUTSIDE conversation.external() — calling Telegram API
+        // inside external() breaks Grammy v2 replay: the call fires on first run but is
+        // skipped during replay (external() returns cached result), causing step-counter
+        // mismatch and a permanent waitForCallbackQuery hang.
+        logger.info('[conversation/settings] token exists, auto-syncing', { userId: user!.id })
+        type AutoSyncResult = 'ok' | 'expired' | 'error'
+        const syncResult = await conversation.external<AutoSyncResult>(async () => {
           try {
             await syncUserPeriodsToSoloLeveling(user!.id)
-            logger.info('[FIX][conversation/settings] auto-sync done', { userId: user!.id })
+            logger.info('[conversation/settings] auto-sync done', { userId: user!.id })
+            return 'ok'
           } catch (err) {
             const code = (err as { code?: number }).code
-            logger.error('[FIX][conversation/settings] auto-sync failed', { userId: user!.id, code, error: err instanceof Error ? err.message : String(err) })
-            if (code === 401) {
-              // Token was cleared by syncUserPeriodsToSoloLeveling — refresh user object
-              user = await getUserByTelegramId(user!.telegram_id) ?? user!
-              await ctx.reply('❌ Токен устарел и был удалён. Введи новый токен через /settings → SoloLeveling.', { reply_markup: buildSettingsKeyboard(false) })
-              return
-            }
-            await ctx.reply('❌ Не удалось связаться с SoloLeveling. Попробуй позже.', { reply_markup: buildSettingsKeyboard(true) })
-            return
+            logger.error('[conversation/settings] auto-sync failed', { userId: user!.id, code, error: err instanceof Error ? err.message : String(err) })
+            return code === 401 ? 'expired' : 'error'
           }
-          await ctx.reply('✅ Периоды синхронизированы с SoloLeveling!', { reply_markup: buildSettingsKeyboard(true) })
         })
+        if (syncResult === 'expired') {
+          // syncUserPeriodsToSoloLeveling already cleared the token — refresh user object.
+          // Fallback to stale user on DB error: token is already cleared in DB, safe to continue.
+          user = await conversation.external<DbUser>(async () => {
+            try {
+              return (await getUserByTelegramId(user!.telegram_id)) ?? user!
+            } catch {
+              return user!
+            }
+          })
+          await ctx.reply('❌ Токен устарел и был удалён. Введи новый токен через /settings → SoloLeveling.', { reply_markup: buildSettingsKeyboard(false) })
+        } else if (syncResult === 'error') {
+          await ctx.reply('❌ Не удалось связаться с SoloLeveling. Попробуй позже.', { reply_markup: buildSettingsKeyboard(true) })
+        } else {
+          await ctx.reply('✅ Периоды синхронизированы с SoloLeveling!', { reply_markup: buildSettingsKeyboard(true) })
+        }
       } else {
         // No token — ask for it
         await ctx.reply('Введи токен SoloLeveling (найти в настройках приложения):')
         const { text: slToken } = await waitForText(conversation)
 
         const periods = await conversation.external(() => getUserPeriods(user!.id))
-        logger.info('[FIX][conversation/settings] sending periods to SoloLeveling', { userId: user!.id, count: periods.length })
+        logger.info('[conversation/settings] sending periods to SoloLeveling', { userId: user!.id, count: periods.length })
 
-        await conversation.external(async () => {
-          await sendPeriodsToSoloLeveling(
-            slToken.trim(),
-            periods.map((p) => ({
-              name: p.name,
-              slug: p.slug,
-              queue_slug: p.queue_slug,
-              start_time: p.start_time,
-              end_time: p.end_time,
-              days_of_week: p.days_of_week,
-            })),
-          )
-          user = await updateUser(user!.id, { solo_leveling_token: slToken.trim() })
-          logger.info('[FIX][conversation/settings] token saved', { userId: user!.id })
-        }).then(
-          () => ctx.reply('✅ Периоды переданы в SoloLeveling! Настрой маппинг сфер в настройках SoloLeveling.', { reply_markup: buildSettingsKeyboard(true) }),
-          (err) => {
+        type SyncTokenResult =
+          | { ok: true; updatedUser: DbUser }
+          | { ok: false; code?: number }
+        const result = await conversation.external<SyncTokenResult>(async () => {
+          try {
+            await sendPeriodsToSoloLeveling(
+              slToken.trim(),
+              periods.map((p) => ({
+                name: p.name,
+                slug: p.slug,
+                queue_slug: p.queue_slug,
+                start_time: p.start_time,
+                end_time: p.end_time,
+                days_of_week: p.days_of_week,
+              })),
+            )
+            const updatedUser = await updateUser(user!.id, { solo_leveling_token: slToken.trim() })
+            logger.info('[conversation/settings] token saved', { userId: updatedUser.id })
+            return { ok: true, updatedUser }
+          } catch (err) {
             const code = (err as { code?: number }).code
-            logger.error('[FIX][conversation/settings] SoloLeveling sync failed', { userId: user!.id, code, error: err instanceof Error ? err.message : String(err) })
-            const msg = code === 401
-              ? '❌ Неверный токен. Проверь токен и попробуй снова.'
-              : '❌ Не удалось связаться с SoloLeveling. Попробуй позже.'
-            return ctx.reply(msg, { reply_markup: buildSettingsKeyboard(false) })
-          },
-        )
+            logger.error('[conversation/settings] SoloLeveling sync failed', { userId: user!.id, code, error: err instanceof Error ? err.message : String(err) })
+            return { ok: false, code }
+          }
+        })
+        if (result.ok) {
+          user = result.updatedUser
+          await ctx.reply('✅ Периоды переданы в SoloLeveling! Настрой маппинг сфер в настройках SoloLeveling.', { reply_markup: buildSettingsKeyboard(true) })
+        } else {
+          const msg = result.code === 401
+            ? '❌ Неверный токен. Проверь токен и попробуй снова.'
+            : '❌ Не удалось связаться с SoloLeveling. Попробуй позже.'
+          await ctx.reply(msg, { reply_markup: buildSettingsKeyboard(false) })
+        }
       }
     } else if (action === 'set_calendar') {
       const hasGoogleConfig = !!(
